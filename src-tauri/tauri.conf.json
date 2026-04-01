@@ -13,9 +13,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "ask-my-files",
-        "width": 800,
-        "height": 600
+        "title": "Ask My Files",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 720
       }
     ],
     "security": {
