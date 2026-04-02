@@ -310,23 +310,66 @@ fn run_semantic_backfill_job(
         return Ok(());
     }
 
-    for batch in candidates.chunks(semantic::SEMANTIC_BATCH_SIZE) {
-        if !job_is_current(&conn, root_id, job_id)? {
+    let items = candidates
+        .iter()
+        .filter_map(semantic::build_index_item)
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let mut text_items = Vec::new();
+    let mut image_items = Vec::new();
+
+    for item in items {
+        match item.modality.as_str() {
+            "text" => text_items.push(item),
+            "image" => image_items.push(item),
+            _ => {}
+        }
+    }
+
+    let mut handle = semantic::open_index_handle(vector_db_path)?;
+    process_semantic_items(
+        &mut conn,
+        &mut handle,
+        model_cache_dir,
+        root_id,
+        job_id,
+        &text_items,
+        semantic::SEMANTIC_TEXT_BATCH_SIZE,
+    )?;
+    process_semantic_items(
+        &mut conn,
+        &mut handle,
+        model_cache_dir,
+        root_id,
+        job_id,
+        &image_items,
+        semantic::SEMANTIC_IMAGE_BATCH_SIZE,
+    )?;
+
+    Ok(())
+}
+
+fn process_semantic_items(
+    conn: &mut rusqlite::Connection,
+    handle: &mut semantic::SemanticIndexHandle,
+    model_cache_dir: &Path,
+    root_id: i64,
+    job_id: i64,
+    items: &[semantic::SemanticIndexItem],
+    batch_size: usize,
+) -> Result<()> {
+    for batch in items.chunks(batch_size.max(1)) {
+        if !job_is_current(conn, root_id, job_id)? {
             return Ok(());
         }
 
-        let items = batch
-            .iter()
-            .filter_map(semantic::build_index_item)
-            .collect::<Vec<_>>();
-
-        if items.is_empty() {
-            continue;
-        }
-
-        match semantic::index_batch(vector_db_path, model_cache_dir, &items) {
+        match semantic::index_batch_with_handle(handle, model_cache_dir, batch) {
             Ok(records) => {
                 let tx = conn.transaction()?;
+                let indexed_at = unix_timestamp();
                 for record in records {
                     storage::replace_semantic_record(
                         &tx,
@@ -335,7 +378,7 @@ fn run_semantic_backfill_job(
                         record.modality.as_deref(),
                         record.model.as_deref(),
                         record.summary.as_deref(),
-                        unix_timestamp(),
+                        indexed_at,
                         record.error_message.as_deref(),
                     )?;
                 }
@@ -343,7 +386,8 @@ fn run_semantic_backfill_job(
             }
             Err(error) => {
                 let tx = conn.transaction()?;
-                for item in &items {
+                let indexed_at = unix_timestamp();
+                for item in batch {
                     storage::replace_semantic_record(
                         &tx,
                         item.file_id,
@@ -351,7 +395,7 @@ fn run_semantic_backfill_job(
                         Some(&item.modality),
                         Some(semantic::semantic_model_name()),
                         item.summary.as_deref(),
-                        unix_timestamp(),
+                        indexed_at,
                         Some(&error.to_string()),
                     )?;
                 }

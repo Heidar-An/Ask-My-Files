@@ -26,7 +26,8 @@ const TABLE_NAME: &str = "file_embeddings";
 const CLIP_MODEL_NAME: &str = "clip-vit-b32";
 const VECTOR_DIMENSIONS: i32 = 512;
 const MAX_TEXT_CHARS: usize = 1_600;
-pub const SEMANTIC_BATCH_SIZE: usize = 24;
+pub const SEMANTIC_TEXT_BATCH_SIZE: usize = 96;
+pub const SEMANTIC_IMAGE_BATCH_SIZE: usize = 12;
 
 #[derive(Debug, Clone)]
 pub enum SemanticPayload {
@@ -59,6 +60,12 @@ pub struct IndexedSemanticRecord {
     pub model: Option<String>,
     pub summary: Option<String>,
     pub error_message: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct SemanticIndexHandle {
+    connection: Connection,
+    table: Option<Table>,
 }
 
 #[derive(Default)]
@@ -98,8 +105,16 @@ pub fn prepare_semantic_plan(kind: &str) -> SemanticPlan {
     }
 }
 
-pub fn index_batch(
-    vector_db_path: &Path,
+pub fn open_index_handle(vector_db_path: &Path) -> Result<SemanticIndexHandle> {
+    tauri::async_runtime::block_on(async move {
+        let connection = connect_to_db(vector_db_path).await?;
+        let table = connection.open_table(TABLE_NAME).execute().await.ok();
+        Ok::<SemanticIndexHandle, anyhow::Error>(SemanticIndexHandle { connection, table })
+    })
+}
+
+pub fn index_batch_with_handle(
+    handle: &mut SemanticIndexHandle,
     model_cache_dir: &Path,
     items: &[SemanticIndexItem],
 ) -> Result<Vec<IndexedSemanticRecord>> {
@@ -172,8 +187,8 @@ pub fn index_batch(
         })
         .collect::<Vec<_>>();
 
-    tauri::async_runtime::block_on(async move {
-        upsert_rows(vector_db_path, &enriched_items).await?;
+    tauri::async_runtime::block_on(async {
+        handle.upsert_rows(&enriched_items).await?;
         Ok::<(), anyhow::Error>(())
     })?;
 
@@ -424,35 +439,35 @@ async fn connect_to_db(vector_db_path: &Path) -> Result<Connection> {
         .map_err(Into::into)
 }
 
-async fn upsert_rows(vector_db_path: &Path, items: &[IndexedRow]) -> Result<()> {
-    if items.is_empty() {
-        return Ok(());
+impl SemanticIndexHandle {
+    async fn upsert_rows(&mut self, items: &[IndexedRow]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let table = self.ensure_table(items).await?;
+        let batch = build_record_batch(items)?;
+        let schema = batch.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        table.add(reader).execute().await?;
+        Ok(())
     }
 
-    let connection = connect_to_db(vector_db_path).await?;
-    let table = ensure_table(&connection, items).await?;
-
-    let batch = build_record_batch(items)?;
-    let schema = batch.schema();
-    let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
-    table.add(reader).execute().await?;
-
-    Ok(())
-}
-
-async fn ensure_table(connection: &Connection, seed_items: &[IndexedRow]) -> Result<Table> {
-    match connection.open_table(TABLE_NAME).execute().await {
-        Ok(table) => Ok(table),
-        Err(_) => {
-            let batch = build_record_batch(seed_items)?;
-            let schema = batch.schema();
-            let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
-            connection
-                .create_table(TABLE_NAME, reader)
-                .execute()
-                .await
-                .map_err(Into::into)
+    async fn ensure_table(&mut self, seed_items: &[IndexedRow]) -> Result<Table> {
+        if let Some(table) = &self.table {
+            return Ok(table.clone());
         }
+
+        let batch = build_record_batch(seed_items)?;
+        let schema = batch.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let table = self
+            .connection
+            .create_table(TABLE_NAME, reader)
+            .execute()
+            .await?;
+        self.table = Some(table.clone());
+        Ok(table)
     }
 }
 
