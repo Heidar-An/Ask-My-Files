@@ -9,6 +9,7 @@ mod shell;
 mod state;
 mod storage;
 mod utils;
+mod watchers;
 
 use state::AppState;
 use tauri::Manager;

@@ -11,14 +11,16 @@ pub use content::{
 };
 pub use files::{
     delete_files_by_ids, fetch_candidates, fetch_candidates_by_ids, fetch_file_details,
-    fetch_root_file_snapshots, index_file,
+    fetch_file_ids_by_paths, fetch_file_snapshots_by_paths, fetch_root_file_snapshots, index_file,
 };
 pub use jobs::{
     create_index_job, fetch_job_by_id, fetch_latest_job, fetch_latest_jobs, mark_job_failed,
     update_job_progress, update_root_ready,
 };
 pub use roots::{
-    fetch_roots, insert_or_update_root, lookup_root_path, lookup_root_status, remove_root,
+    fetch_roots, insert_or_update_root, list_root_watch_entries, lookup_root_path,
+    lookup_root_record, lookup_root_status, mark_root_change_detected, mark_root_synced,
+    mark_root_syncing, mark_root_watch_state, refresh_root_file_count, remove_root,
 };
 pub use schema::{initialize_database, open_connection};
 pub use semantic::{

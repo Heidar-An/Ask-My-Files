@@ -6,13 +6,27 @@ pub struct IndexedRoot {
     pub id: i64,
     pub path: String,
     pub status: String,
+    pub sync_status: String,
     pub file_count: i64,
     pub content_indexed_count: i64,
     pub content_pending_count: i64,
     pub semantic_indexed_count: i64,
     pub semantic_pending_count: i64,
     pub last_indexed_at: Option<i64>,
+    pub last_synced_at: Option<i64>,
+    pub last_change_at: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoreBreakdown {
+    pub metadata: i64,
+    pub lexical: i64,
+    pub semantic_text: i64,
+    pub semantic_image: i64,
+    pub recency: i64,
+    pub total: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +43,7 @@ pub struct SearchResult {
     pub indexed_at: i64,
     pub score: i64,
     pub semantic_score: Option<f32>,
+    pub score_breakdown: ScoreBreakdown,
     pub match_reasons: Vec<String>,
     pub snippet: Option<String>,
     pub snippet_source: Option<String>,

@@ -6,7 +6,10 @@ use std::path::Path;
 pub fn create_index_job(conn: &Connection, root_id: i64, now: i64) -> Result<i64> {
     conn.execute(
         "UPDATE indexed_roots
-         SET status = 'indexing', last_error = NULL, updated_at = ?2
+         SET status = 'indexing',
+             sync_status = 'syncing',
+             last_error = NULL,
+             updated_at = ?2
          WHERE id = ?1",
         params![root_id, now],
     )?;
@@ -98,7 +101,7 @@ pub fn mark_job_failed(db_path: &Path, root_id: i64, job_id: i64, message: &str)
     let now = unix_timestamp();
     conn.execute(
         "UPDATE indexed_roots
-         SET status = 'error', last_error = ?2, updated_at = ?3
+         SET status = 'error', sync_status = 'error', last_error = ?2, updated_at = ?3
          WHERE id = ?1",
         params![root_id, message, now],
     )?;
@@ -152,8 +155,10 @@ pub fn update_root_ready(
     conn.execute(
         "UPDATE indexed_roots
          SET status = 'ready',
+             sync_status = 'watching',
              file_count = ?2,
              last_indexed_at = ?3,
+             last_synced_at = ?3,
              last_error = ?4,
              updated_at = ?3
          WHERE id = ?1",

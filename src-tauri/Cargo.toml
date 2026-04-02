@@ -25,6 +25,7 @@ arrow-schema = "57.2"
 fastembed = "5.13"
 futures = "0.3"
 lancedb = "0.26"
+notify = "6"
 once_cell = "1.21"
 pdf_oxide = { version = "0.3.17", features = ["parallel"] }
 rayon = "1.10"

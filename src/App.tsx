@@ -7,13 +7,25 @@ type IndexedRoot = {
   id: number;
   path: string;
   status: string;
+  syncStatus: string;
   fileCount: number;
   contentIndexedCount: number;
   contentPendingCount: number;
   semanticIndexedCount: number;
   semanticPendingCount: number;
   lastIndexedAt: number | null;
+  lastSyncedAt: number | null;
+  lastChangeAt: number | null;
   lastError: string | null;
+};
+
+type ScoreBreakdown = {
+  metadata: number;
+  lexical: number;
+  semanticText: number;
+  semanticImage: number;
+  recency: number;
+  total: number;
 };
 
 type IndexStatus = {
@@ -41,6 +53,7 @@ type SearchResult = {
   indexedAt: number;
   score: number;
   semanticScore: number | null;
+  scoreBreakdown: ScoreBreakdown;
   matchReasons: string[];
   snippet: string | null;
   snippetSource: string | null;
@@ -76,6 +89,7 @@ type SearchRequest = {
 };
 
 type ViewName = "home" | "results" | "sources" | "settings";
+type ResultViewMode = "list" | "grid";
 
 const SEARCH_PLACEHOLDERS = [
   "passport photo",
@@ -90,6 +104,10 @@ const SUGGESTIONS = [
   "quarterly budget",
   "typescript config",
 ];
+const FILE_TYPE_FILTERS = ["document", "image", "text", "code", "other"] as const;
+const RECENT_SEARCHES_KEY = "mira.recent-searches";
+const RESULT_VIEW_MODE_KEY = "mira.result-view-mode";
+const FILE_TYPE_FILTERS_KEY = "mira.file-type-filters";
 
 const panelClass =
   "rounded-[30px] border border-black/5 bg-white/78 shadow-[0_22px_60px_rgba(85,93,122,0.08)] backdrop-blur-xl";
@@ -102,8 +120,11 @@ export function App() {
   const [roots, setRoots] = useState<IndexedRoot[]>([]);
   const [statuses, setStatuses] = useState<Record<number, IndexStatus>>({});
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [selectedRootIds, setSelectedRootIds] = useState<number[]>([]);
+  const [activeKinds, setActiveKinds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [resultViewMode, setResultViewMode] = useState<ResultViewMode>("list");
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileDetails | null>(null);
   const [currentView, setCurrentView] = useState<ViewName>("home");
@@ -142,9 +163,16 @@ export function App() {
   ).length;
   const selectedPreviewUrl =
     selectedFile?.previewPath ? convertFileSrc(selectedFile.previewPath) : null;
-  const featuredResult = results[0] ?? null;
-  const secondaryResults = results.slice(1, 4);
-  const listResults = results.slice(4);
+  const visibleResults = useMemo(() => {
+    if (activeKinds.length === 0) {
+      return results;
+    }
+
+    return results.filter((result) => activeKinds.includes(result.kind));
+  }, [activeKinds, results]);
+  const featuredResult = visibleResults[0] ?? null;
+  const secondaryResults = visibleResults.slice(1, 4);
+  const listResults = visibleResults.slice(4);
   const pinnedRoots = roots.slice(0, 3);
   const currentStatusText =
     runningIndexCount > 0
@@ -154,6 +182,15 @@ export function App() {
       : activeRootCount > 0
         ? "Index is active"
         : "Waiting for sources";
+
+  useEffect(() => {
+    setRecentSearches(readStoredList(RECENT_SEARCHES_KEY));
+    setActiveKinds(readStoredList(FILE_TYPE_FILTERS_KEY));
+    const storedView = window.localStorage.getItem(RESULT_VIEW_MODE_KEY);
+    if (storedView === "list" || storedView === "grid") {
+      setResultViewMode(storedView);
+    }
+  }, []);
 
   useEffect(() => {
     void hydrate();
@@ -182,7 +219,7 @@ export function App() {
   }, [query, currentView]);
 
   useEffect(() => {
-    if (results.length === 0) {
+    if (visibleResults.length === 0) {
       setSelectedFileId(null);
       setSelectedFile(null);
       return;
@@ -190,11 +227,23 @@ export function App() {
 
     if (
       selectedFileId === null ||
-      !results.some((result) => result.fileId === selectedFileId)
+      !visibleResults.some((result) => result.fileId === selectedFileId)
     ) {
-      setSelectedFileId(results[0].fileId);
+      setSelectedFileId(visibleResults[0].fileId);
     }
-  }, [results, selectedFileId]);
+  }, [visibleResults, selectedFileId]);
+
+  useEffect(() => {
+    window.localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(recentSearches));
+  }, [recentSearches]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FILE_TYPE_FILTERS_KEY, JSON.stringify(activeKinds));
+  }, [activeKinds]);
+
+  useEffect(() => {
+    window.localStorage.setItem(RESULT_VIEW_MODE_KEY, resultViewMode);
+  }, [resultViewMode]);
 
   useEffect(() => {
     if (selectedFileId === null) {
@@ -249,6 +298,12 @@ export function App() {
 
       const nextResults = await invoke<SearchResult[]>("search_files", { request: payload });
       setResults(nextResults);
+      if (nextQuery.trim().length >= 2) {
+        setRecentSearches((current) => {
+          const normalized = nextQuery.trim();
+          return [normalized, ...current.filter((entry) => entry !== normalized)].slice(0, 8);
+        });
+      }
       setMessage(null);
     } catch (error) {
       setMessage(getErrorMessage(error));
@@ -344,6 +399,16 @@ export function App() {
     );
   }
 
+  function toggleKindFilter(kind: string) {
+    setActiveKinds((current) =>
+      current.includes(kind) ? current.filter((entry) => entry !== kind) : [...current, kind],
+    );
+  }
+
+  function clearKindFilters() {
+    setActiveKinds([]);
+  }
+
   const headerTitle =
     currentView === "results" && query.trim().length > 0
       ? "Search analysis"
@@ -386,7 +451,7 @@ export function App() {
               active={currentView === "results"}
               onClick={() => setCurrentView("results")}
               icon={<ResultsIcon />}
-              badge={results.length > 0 ? results.length : undefined}
+              badge={visibleResults.length > 0 ? visibleResults.length : undefined}
             />
             <SidebarLink
               label="Sources"
@@ -481,6 +546,7 @@ export function App() {
                   query={query}
                   setQuery={setQuery}
                   setCurrentView={setCurrentView}
+                  recentSearches={recentSearches}
                   selectedFile={selectedFile}
                   selectedPreviewUrl={selectedPreviewUrl}
                   pinnedRoots={pinnedRoots}
@@ -491,14 +557,21 @@ export function App() {
               {currentView === "results" && (
                 <ResultsView
                   query={query}
-                  results={results}
+                  results={visibleResults}
                   featuredResult={featuredResult}
                   secondaryResults={secondaryResults}
                   listResults={listResults}
                   selectedFile={selectedFile}
                   selectedPreviewUrl={selectedPreviewUrl}
+                  recentSearches={recentSearches}
+                  resultViewMode={resultViewMode}
+                  activeKinds={activeKinds}
                   isHydrating={isHydrating}
                   isSearching={isSearching}
+                  onQuerySelect={setQuery}
+                  onSetViewMode={setResultViewMode}
+                  onToggleKindFilter={toggleKindFilter}
+                  onClearKindFilters={clearKindFilters}
                   onSelectResult={setSelectedFileId}
                   onOpenFile={handleOpenFile}
                   onRevealFile={handleRevealFile}
@@ -548,6 +621,7 @@ function HomeView({
   query,
   setQuery,
   setCurrentView,
+  recentSearches,
   selectedFile,
   selectedPreviewUrl,
   pinnedRoots,
@@ -559,6 +633,7 @@ function HomeView({
   query: string;
   setQuery: (value: string) => void;
   setCurrentView: (view: ViewName) => void;
+  recentSearches: string[];
   selectedFile: FileDetails | null;
   selectedPreviewUrl: string | null;
   pinnedRoots: IndexedRoot[];
@@ -615,6 +690,28 @@ function HomeView({
             ))}
           </div>
         </div>
+
+        {recentSearches.length > 0 ? (
+          <div className="mt-6">
+            <p className="text-[0.75rem] uppercase tracking-[0.22em] text-[#8a8f93]">
+              Recent searches
+            </p>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+              {recentSearches.map((recent) => (
+                <button
+                  key={recent}
+                  className="rounded-full border border-black/5 bg-white px-4 py-2.5 text-sm font-medium text-[#4f5652] transition hover:-translate-y-0.5 hover:bg-[#f8f6f1]"
+                  onClick={() => {
+                    setQuery(recent);
+                    setCurrentView("results");
+                  }}
+                >
+                  {recent}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.45fr_0.75fr]">
@@ -691,7 +788,7 @@ function HomeView({
                   <div className="min-w-0">
                     <p className="truncate text-base font-medium text-[#1f2723]">{shortPath(root.path)}</p>
                     <p className="mt-1 text-sm leading-6 text-[#727977]">
-                      {root.fileCount.toLocaleString()} files • {statusLabel(root.status)}
+                      {root.fileCount.toLocaleString()} files • {statusLabel(root.status)} • {syncStatusLabel(root.syncStatus)}
                     </p>
                   </div>
                 </div>
@@ -712,6 +809,7 @@ function HomeView({
                 <SelectedFilePreview
                   file={selectedFile}
                   previewUrl={selectedPreviewUrl}
+                  query={query}
                   className="h-48 rounded-[20px]"
                 />
                 <div>
@@ -746,8 +844,15 @@ function ResultsView({
   listResults,
   selectedFile,
   selectedPreviewUrl,
+  recentSearches,
+  resultViewMode,
+  activeKinds,
   isHydrating,
   isSearching,
+  onQuerySelect,
+  onSetViewMode,
+  onToggleKindFilter,
+  onClearKindFilters,
   onSelectResult,
   onOpenFile,
   onRevealFile,
@@ -760,8 +865,15 @@ function ResultsView({
   listResults: SearchResult[];
   selectedFile: FileDetails | null;
   selectedPreviewUrl: string | null;
+  recentSearches: string[];
+  resultViewMode: ResultViewMode;
+  activeKinds: string[];
   isHydrating: boolean;
   isSearching: boolean;
+  onQuerySelect: (query: string) => void;
+  onSetViewMode: (mode: ResultViewMode) => void;
+  onToggleKindFilter: (kind: string) => void;
+  onClearKindFilters: () => void;
   onSelectResult: (fileId: number) => void;
   onOpenFile: (path: string) => Promise<void>;
   onRevealFile: (path: string) => Promise<void>;
@@ -801,21 +913,84 @@ function ResultsView({
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <button className={buttonClass}>
-              <FilterIcon />
-              Filter
-            </button>
-            <button className={buttonClass}>
-              <ShareIcon />
-              Share
-            </button>
+            <div className="inline-flex rounded-[18px] border border-black/8 bg-white/80 p-1">
+              <button
+                className={cx(
+                  "rounded-[14px] px-3 py-2 text-sm font-medium transition",
+                  resultViewMode === "list" ? "bg-[#737792] text-white" : "text-[#58605c]",
+                )}
+                onClick={() => onSetViewMode("list")}
+              >
+                List
+              </button>
+              <button
+                className={cx(
+                  "rounded-[14px] px-3 py-2 text-sm font-medium transition",
+                  resultViewMode === "grid" ? "bg-[#737792] text-white" : "text-[#58605c]",
+                )}
+                onClick={() => onSetViewMode("grid")}
+              >
+                Grid
+              </button>
+            </div>
+            {activeKinds.length > 0 ? (
+              <button className={buttonClass} onClick={onClearKindFilters}>
+                <FilterIcon />
+                Clear filters
+              </button>
+            ) : null}
           </div>
         </div>
+
+        <div className="mt-5 flex flex-wrap gap-2">
+          {FILE_TYPE_FILTERS.map((kind) => {
+            const active = activeKinds.includes(kind);
+            return (
+              <button
+                key={kind}
+                className={cx(
+                  "rounded-full px-4 py-2 text-sm font-medium transition",
+                  active
+                    ? "bg-[#737792] text-white shadow-[0_10px_24px_rgba(115,119,146,0.18)]"
+                    : "bg-[#f3f1ea] text-[#646b67] hover:bg-[#ebe7de]",
+                )}
+                onClick={() => onToggleKindFilter(kind)}
+              >
+                {kindLabel(kind)}
+              </button>
+            );
+          })}
+        </div>
+
+        {recentSearches.length > 0 ? (
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-sm text-[#6c7370]">
+            <span className="uppercase tracking-[0.16em] text-[0.72rem] text-[#848a8e]">
+              Recent
+            </span>
+            {recentSearches.slice(0, 4).map((recent) => (
+              <button
+                key={recent}
+                className="rounded-full border border-black/5 bg-white px-3 py-1.5 text-[#4f5652] transition hover:bg-[#f8f6f1]"
+                onClick={() => onQuerySelect(recent)}
+              >
+                {recent}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {results.length === 0 ? (
         <div className={cx(panelClass, "p-8 text-center")}>
-          <p className="display-type text-[2rem] text-[#262d2a]">{emptyState}</p>
+          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full bg-[#eef0f6] text-[#737792]">
+            {isSearching || isHydrating ? <SearchIcon className="h-6 w-6" /> : <DocumentIcon />}
+          </div>
+          <p className="display-type mt-5 text-[2rem] text-[#262d2a]">{emptyState}</p>
+          <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-[#6d7470]">
+            {activeKinds.length > 0
+              ? "Try removing a type filter or switching back to all results."
+              : "You can search by filename, text contents, semantic meaning, and visual similarity."}
+          </p>
           {message ? <p className="mt-3 text-sm text-[color:var(--danger)]">{message}</p> : null}
         </div>
       ) : (
@@ -884,6 +1059,9 @@ function ResultsView({
                   <p className="mt-4 text-sm leading-6 text-[#666d6a]">
                     {result.snippet ?? shortPath(result.path)}
                   </p>
+                  <p className="mt-3 text-xs uppercase tracking-[0.12em] text-[#7b8186]">
+                    {scoreSummary(result.scoreBreakdown)}
+                  </p>
                   <div className="mt-4 flex flex-wrap gap-2">
                     {result.matchReasons.slice(0, 2).map((reason) => (
                       <span
@@ -901,43 +1079,32 @@ function ResultsView({
 
           <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
             <article className={cx(panelClass, "p-6")}>
-              <div className="flex items-center gap-3">
-                <ListIcon />
-                <h3 className="display-type text-[1.6rem] text-[#202724]">Explorer</h3>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {resultViewMode === "grid" ? <GridIcon /> : <ListIcon />}
+                  <h3 className="display-type text-[1.6rem] text-[#202724]">Explorer</h3>
+                </div>
+                <p className="text-sm text-[#727977]">
+                  {results.length.toLocaleString()} result{results.length === 1 ? "" : "s"}
+                </p>
               </div>
 
-              <div className="mt-5 space-y-3">
+              <div
+                className={cx(
+                  "mt-5",
+                  resultViewMode === "grid"
+                    ? "grid gap-4 md:grid-cols-2"
+                    : "space-y-3",
+                )}
+              >
                 {(listResults.length > 0 ? listResults : results).map((result) => (
-                  <button
+                  <ResultExplorerCard
                     key={result.fileId}
-                    className="flex w-full items-start gap-4 rounded-[22px] border border-black/5 bg-white/70 p-4 text-left transition hover:-translate-y-0.5 hover:bg-white"
-                    onClick={() => onSelectResult(result.fileId)}
-                  >
-                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[#eef0f6] text-[#737792]">
-                      {iconForKind(result.kind)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[0.72rem] uppercase tracking-[0.14em] text-[#7b8186]">
-                        {kindLabel(result.kind)} • {result.modifiedAt ? formatRelativeDate(result.modifiedAt) : "Recently indexed"}
-                      </p>
-                      <p className="display-type mt-2 text-[1.3rem] leading-8 text-[#202724]">
-                        {result.name}
-                      </p>
-                      <p className="mt-2 text-sm leading-6 text-[#666d6a]">
-                        {result.snippet ?? result.path}
-                      </p>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {result.matchReasons.slice(0, 3).map((reason) => (
-                          <span
-                            key={`${result.fileId}-${reason}`}
-                            className="rounded-full bg-[#f3f1ea] px-2.5 py-1 text-[0.68rem] uppercase tracking-[0.12em] text-[#686f88]"
-                          >
-                            {reason}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  </button>
+                    result={result}
+                    query={query}
+                    layout={resultViewMode}
+                    onSelectResult={onSelectResult}
+                  />
                 ))}
               </div>
             </article>
@@ -957,6 +1124,7 @@ function ResultsView({
                   <SelectedFilePreview
                     file={selectedFile}
                     previewUrl={selectedPreviewUrl}
+                    query={query}
                     className="h-60 rounded-[24px]"
                   />
 
@@ -964,12 +1132,18 @@ function ResultsView({
                     <p className="display-type text-[1.8rem] leading-tight text-[#202724]">
                       {selectedFile.name}
                     </p>
-                    <p className="mt-3 text-sm leading-7 text-[#666d6a]">
-                      {selectedFile.contentSnippet ??
+                    <HighlightedSnippet
+                      className="mt-3 text-sm leading-7 text-[#666d6a]"
+                      text={
+                        selectedFile.contentSnippet ??
                         selectedFile.semanticSummary ??
-                        "This file is available in your workspace. Use the actions below to open or reveal it."}
-                    </p>
+                        "This file is available in your workspace. Use the actions below to open or reveal it."
+                      }
+                      query={query}
+                    />
                   </div>
+
+                  <PreviewInsightCard file={selectedFile} query={query} />
 
                   <div className="grid gap-3 text-sm text-[#666d6a]">
                     <InfoRow label="Location" value={selectedFile.path} />
@@ -990,17 +1164,22 @@ function ResultsView({
                     {selectedFile.contentSource ? (
                       <InfoRow label="Snippet source" value={selectedFile.contentSource} />
                     ) : null}
+                    <InfoRow label="Indexed" value={formatDate(selectedFile.indexedAt)} />
                   </div>
 
                   {selectedFile.extractionError ? (
-                    <div className="rounded-[20px] bg-[#fff3ef] px-4 py-3 text-sm text-[color:var(--danger)]">
-                      {selectedFile.extractionError}
-                    </div>
+                    <StatusNotice
+                      tone="danger"
+                      title="Content extraction needs attention"
+                      body={selectedFile.extractionError}
+                    />
                   ) : null}
                   {selectedFile.semanticError ? (
-                    <div className="rounded-[20px] bg-[#fff7e8] px-4 py-3 text-sm text-[#8b6322]">
-                      {selectedFile.semanticError}
-                    </div>
+                    <StatusNotice
+                      tone="warning"
+                      title="Semantic enrichment is partial"
+                      body={selectedFile.semanticError}
+                    />
                   ) : null}
 
                   <div className="flex flex-wrap gap-3">
@@ -1202,7 +1381,10 @@ function SourcesView({
                       <span>{root.fileCount.toLocaleString()} files</span>
                       <span>{root.contentIndexedCount.toLocaleString()} content-ready</span>
                       <span>{root.semanticIndexedCount.toLocaleString()} semantic-ready</span>
+                      <span>{syncStatusLabel(root.syncStatus)}</span>
+                      <span>{freshnessLabel(root)}</span>
                       <span>{root.lastIndexedAt ? formatDate(root.lastIndexedAt) : "Not indexed yet"}</span>
+                      <span>{root.lastSyncedAt ? `Synced ${formatRelativeDate(root.lastSyncedAt)}` : "Sync not started"}</span>
                       {status?.currentPath ? <span className="truncate">{status.currentPath}</span> : null}
                     </div>
 
@@ -1275,10 +1457,10 @@ function SettingsView({
         <h2 className="display-type text-[1.8rem] text-[#202724]">What comes next</h2>
         <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {[
-            "Semantic ranking powered by LanceDB",
-            "Richer previews for PDFs and Office docs",
             "Saved search collections and pinned files",
-            "Incremental watchers for real-time refresh",
+            "Drag-and-drop result actions for triage flows",
+            "Deeper preview support for Office documents",
+            "Smarter recovery tools for failed semantic batches",
           ].map((item) => (
             <div key={item} className="rounded-[24px] bg-[#faf9f6] p-5 text-sm leading-7 text-[#6d7470]">
               {item}
@@ -1446,33 +1628,189 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ResultExplorerCard({
+  result,
+  query,
+  layout,
+  onSelectResult,
+}: {
+  result: SearchResult;
+  query: string;
+  layout: ResultViewMode;
+  onSelectResult: (fileId: number) => void;
+}) {
+  const cardClass =
+    layout === "grid"
+      ? "rounded-[24px] border border-black/5 bg-white/72 p-5 text-left transition hover:-translate-y-0.5 hover:bg-white"
+      : "flex w-full items-start gap-4 rounded-[22px] border border-black/5 bg-white/70 p-4 text-left transition hover:-translate-y-0.5 hover:bg-white";
+
+  return (
+    <button className={cardClass} onClick={() => onSelectResult(result.fileId)}>
+      <div
+        className={cx(
+          "grid shrink-0 place-items-center rounded-2xl bg-[#eef0f6] text-[#737792]",
+          layout === "grid" ? "h-14 w-14" : "h-12 w-12",
+        )}
+      >
+        {iconForKind(result.kind)}
+      </div>
+      <div className={cx("min-w-0", layout === "grid" ? "mt-4" : "flex-1")}>
+        <p className="text-[0.72rem] uppercase tracking-[0.14em] text-[#7b8186]">
+          {kindLabel(result.kind)} • {result.modifiedAt ? formatRelativeDate(result.modifiedAt) : "Recently indexed"}
+        </p>
+        <p className="display-type mt-2 text-[1.3rem] leading-8 text-[#202724]">
+          {result.name}
+        </p>
+        <HighlightedSnippet
+          className="mt-2 text-sm leading-6 text-[#666d6a]"
+          text={result.snippet ?? result.path}
+          query={query}
+        />
+        <p className="mt-3 text-xs uppercase tracking-[0.12em] text-[#7b8186]">
+          {scoreSummary(result.scoreBreakdown)}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {result.matchReasons.slice(0, 3).map((reason) => (
+            <span
+              key={`${result.fileId}-${reason}`}
+              className="rounded-full bg-[#f3f1ea] px-2.5 py-1 text-[0.68rem] uppercase tracking-[0.12em] text-[#686f88]"
+            >
+              {reason}
+            </span>
+          ))}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function HighlightedSnippet({
+  text,
+  query,
+  className,
+}: {
+  text: string;
+  query: string;
+  className?: string;
+}) {
+  const segments = buildHighlightSegments(text, query);
+
+  return (
+    <p className={className}>
+      {segments.map((segment, index) =>
+        segment.highlight ? (
+          <mark
+            key={`${segment.text}-${index}`}
+            className="rounded bg-[#f5efb8] px-1 text-[#3a3320]"
+          >
+            {segment.text}
+          </mark>
+        ) : (
+          <span key={`${segment.text}-${index}`}>{segment.text}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+function PreviewInsightCard({ file, query }: { file: FileDetails; query: string }) {
+  return (
+    <div className="rounded-[22px] border border-black/5 bg-[#fbfaf7] p-4">
+      <p className="text-[0.72rem] uppercase tracking-[0.14em] text-[#7c8187]">
+        Preview focus
+      </p>
+      <HighlightedSnippet
+        className="mt-3 text-sm leading-7 text-[#666d6a]"
+        text={
+          file.contentSource
+            ? `Preview anchored to ${file.contentSource}.`
+            : file.extension.toLowerCase() === "pdf"
+              ? "Preview starts on the first available PDF page."
+              : "Preview follows the strongest extracted snippet for this file."
+        }
+        query={query}
+      />
+    </div>
+  );
+}
+
+function StatusNotice({
+  tone,
+  title,
+  body,
+}: {
+  tone: "warning" | "danger";
+  title: string;
+  body: string;
+}) {
+  const className =
+    tone === "danger"
+      ? "rounded-[20px] bg-[#fff3ef] px-4 py-3 text-sm text-[color:var(--danger)]"
+      : "rounded-[20px] bg-[#fff7e8] px-4 py-3 text-sm text-[#8b6322]";
+
+  return (
+    <div className={className}>
+      <p className="font-medium">{title}</p>
+      <p className="mt-1 leading-6">{body}</p>
+    </div>
+  );
+}
+
 function SelectedFilePreview({
   file,
   previewUrl,
+  query,
   className,
 }: {
   file: FileDetails;
   previewUrl: string | null;
+  query: string;
   className: string;
 }) {
   const previewType = getPreviewType(file, previewUrl);
+  const pdfPage = pageNumberFromSource(file.contentSource);
+  const pdfPreviewUrl =
+    previewType === "pdf" && previewUrl
+      ? `${previewUrl}#page=${pdfPage}&toolbar=0&navpanes=0&scrollbar=0&view=FitH`
+      : previewUrl;
 
   if (previewType === "image") {
     return (
-      <div className={cx("overflow-hidden bg-[#eef0f6]", className)}>
-        <img src={previewUrl ?? undefined} alt={file.name} className="h-full w-full object-cover" />
-      </div>
+      <ImagePreviewPanel file={file} previewUrl={previewUrl} className={className} />
     );
   }
 
   if (previewType === "pdf") {
     return (
-      <div className={cx("overflow-hidden bg-[#eef0f6]", className)}>
+      <div className={cx("relative overflow-hidden bg-[#eef0f6]", className)}>
         <iframe
-          src={previewUrl ?? undefined}
+          src={pdfPreviewUrl ?? undefined}
           title={file.name}
           className="h-full w-full border-0 bg-white"
         />
+        <div className="pointer-events-none absolute inset-x-4 bottom-4 rounded-full bg-white/88 px-4 py-2 text-xs uppercase tracking-[0.14em] text-[#5e657f] shadow-[0_10px_24px_rgba(20,20,30,0.08)]">
+          {file.contentSource ? `${file.contentSource} preview` : `Page ${pdfPage} preview`}
+        </div>
+      </div>
+    );
+  }
+
+  if (file.contentSnippet || file.semanticSummary) {
+    return (
+      <div className={cx("overflow-hidden rounded-[24px] border border-black/5 bg-[#fbfaf7] p-5", className)}>
+        <p className="text-[0.72rem] uppercase tracking-[0.14em] text-[#7c8187]">
+          Document preview
+        </p>
+        <HighlightedSnippet
+          className="mt-4 text-sm leading-7 text-[#505854]"
+          text={file.contentSnippet ?? file.semanticSummary ?? file.name}
+          query={query}
+        />
+        {file.contentSource ? (
+          <p className="mt-4 text-xs uppercase tracking-[0.14em] text-[#7c8187]">
+            {file.contentSource}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -1498,6 +1836,46 @@ function getPreviewType(file: FileDetails, previewUrl: string | null) {
   }
 
   return "none";
+}
+
+function ImagePreviewPanel({
+  file,
+  previewUrl,
+  className,
+}: {
+  file: FileDetails;
+  previewUrl: string | null;
+  className: string;
+}) {
+  const [zoom, setZoom] = useState(1);
+
+  return (
+    <div className={cx("relative overflow-hidden bg-[radial-gradient(circle_at_top,rgba(228,231,250,0.45),transparent_55%),#eef0f6]", className)}>
+      <img
+        src={previewUrl ?? undefined}
+        alt={file.name}
+        className="h-full w-full object-contain transition-transform duration-200"
+        style={{ transform: `scale(${zoom})` }}
+      />
+      <div className="absolute bottom-4 left-4 right-4 rounded-[18px] bg-white/86 p-3 shadow-[0_18px_30px_rgba(40,40,60,0.12)] backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[0.72rem] uppercase tracking-[0.14em] text-[#7c8187]">
+            Image zoom
+          </span>
+          <span className="text-sm font-medium text-[#2c332f]">{zoom.toFixed(1)}×</span>
+        </div>
+        <input
+          type="range"
+          min={1}
+          max={3}
+          step={0.1}
+          value={zoom}
+          onChange={(event) => setZoom(Number(event.target.value))}
+          className="mt-3 w-full accent-[#737792]"
+        />
+      </div>
+    </div>
+  );
 }
 
 function statusLabel(status: string) {
@@ -1560,6 +1938,45 @@ function rootPipelineLabel(root: IndexedRoot, status?: IndexStatus) {
   }
 
   return "Queued";
+}
+
+function syncStatusLabel(status: string) {
+  switch (status) {
+    case "watching":
+      return "Live sync active";
+    case "pending":
+      return "Changes detected";
+    case "syncing":
+      return "Applying updates";
+    case "error":
+      return "Sync needs attention";
+    default:
+      return "Sync idle";
+  }
+}
+
+function freshnessLabel(root: IndexedRoot) {
+  if (root.lastChangeAt && (!root.lastSyncedAt || root.lastChangeAt > root.lastSyncedAt)) {
+    return "Freshness: updates pending";
+  }
+
+  if (root.lastSyncedAt) {
+    return "Freshness: current";
+  }
+
+  return "Freshness: unknown";
+}
+
+function scoreSummary(scoreBreakdown: ScoreBreakdown) {
+  const parts = [
+    scoreBreakdown.metadata > 0 ? `metadata ${scoreBreakdown.metadata}` : null,
+    scoreBreakdown.lexical > 0 ? `text ${scoreBreakdown.lexical}` : null,
+    scoreBreakdown.semanticText > 0 ? `semantic text ${scoreBreakdown.semanticText}` : null,
+    scoreBreakdown.semanticImage > 0 ? `visual ${scoreBreakdown.semanticImage}` : null,
+    scoreBreakdown.recency > 0 ? `recent ${scoreBreakdown.recency}` : null,
+  ].filter(Boolean);
+
+  return parts.length > 0 ? parts.join(" • ") : "metadata only";
 }
 
 function contentStatusLabel(status: string | null) {
@@ -1660,6 +2077,50 @@ function formatCompact(value: number) {
 function shortPath(path: string) {
   const parts = path.split("/");
   return parts.slice(-2).join("/") || path;
+}
+
+function readStoredList(key: string) {
+  try {
+    const value = window.localStorage.getItem(key);
+    if (!value) {
+      return [];
+    }
+
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function pageNumberFromSource(source: string | null) {
+  if (!source) {
+    return 1;
+  }
+
+  const match = source.match(/Page\s+(\d+)/i);
+  return match ? Number(match[1]) : 1;
+}
+
+function buildHighlightSegments(text: string, query: string) {
+  const tokens = query
+    .split(/\s+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 2);
+
+  if (tokens.length === 0) {
+    return [{ text, highlight: false }];
+  }
+
+  const pattern = new RegExp(`(${tokens.map(escapeRegExp).join("|")})`, "ig");
+  return text.split(pattern).filter(Boolean).map((segment) => ({
+    text: segment,
+    highlight: tokens.some((token) => token === segment.toLowerCase()),
+  }));
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getErrorMessage(error: unknown) {
@@ -1770,17 +2231,6 @@ function FilterIcon() {
   );
 }
 
-function ShareIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5">
-      <circle cx="18" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="6" cy="12" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="18" cy="19" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <path d="m8.4 10.8 7.2-4.1M8.4 13.2l7.2 4.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function RefreshIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5">
@@ -1864,6 +2314,17 @@ function ListIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5 text-[#737792]">
       <path d="M5 7h14M5 12h14M5 17h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function GridIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5 text-[#737792]">
+      <rect x="4.5" y="4.5" width="6.5" height="6.5" rx="1.4" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="13" y="4.5" width="6.5" height="6.5" rx="1.4" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="4.5" y="13" width="6.5" height="6.5" rx="1.4" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="13" y="13" width="6.5" height="6.5" rx="1.4" stroke="currentColor" strokeWidth="1.8" />
     </svg>
   );
 }

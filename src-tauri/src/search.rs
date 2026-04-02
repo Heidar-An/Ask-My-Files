@@ -1,6 +1,7 @@
 use crate::{
-    models::{ContentMatch, FileCandidate, SearchResult, SemanticMatch},
+    models::{ContentMatch, FileCandidate, ScoreBreakdown, SearchResult, SemanticMatch},
     semantic, storage,
+    utils::unix_timestamp,
 };
 use anyhow::Result;
 use rusqlite::Connection;
@@ -35,6 +36,7 @@ pub fn search_files(
                 indexed_at: candidate.indexed_at,
                 score: 0,
                 semantic_score: None,
+                score_breakdown: ScoreBreakdown::default(),
                 match_reasons: vec!["recent file".to_string()],
                 snippet: None,
                 snippet_source: None,
@@ -111,47 +113,50 @@ fn score_candidate(candidate: FileCandidate, query: &str, tokens: &[String]) -> 
     let lower_path = candidate.path.to_lowercase();
     let lower_ext = candidate.extension.to_lowercase();
 
-    let mut score = 0;
     let mut reasons = Vec::new();
+    let mut breakdown = ScoreBreakdown::default();
 
     if lower_name == query {
-        score += 220;
+        breakdown.metadata += 220;
         reasons.push("exact filename match".to_string());
     }
 
     if lower_path == query {
-        score += 180;
+        breakdown.metadata += 180;
         reasons.push("exact path match".to_string());
     }
 
     if lower_ext == query {
-        score += 130;
+        breakdown.metadata += 130;
         reasons.push("file type match".to_string());
     }
 
     if lower_name.contains(query) {
-        score += 110;
+        breakdown.metadata += 110;
         reasons.push("filename match".to_string());
     }
 
     if lower_path.contains(query) {
-        score += 70;
+        breakdown.metadata += 70;
         reasons.push("path match".to_string());
     }
 
     let mut token_hits = 0;
     for token in tokens {
         if lower_name.contains(token) {
-            score += 32;
+            breakdown.metadata += 32;
             token_hits += 1;
         } else if lower_path.contains(token) {
-            score += 16;
+            breakdown.metadata += 16;
             token_hits += 1;
         } else if lower_ext == *token {
-            score += 24;
+            breakdown.metadata += 24;
             token_hits += 1;
         }
     }
+
+    breakdown.recency = recency_boost(candidate.modified_at.or(Some(candidate.indexed_at)));
+    let score = total_score(&breakdown);
 
     if token_hits > 0 {
         reasons.push("keyword match".to_string());
@@ -176,6 +181,7 @@ fn score_candidate(candidate: FileCandidate, query: &str, tokens: &[String]) -> 
         indexed_at: candidate.indexed_at,
         score,
         semantic_score: None,
+        score_breakdown: finalize_breakdown(breakdown),
         match_reasons: reasons,
         snippet: None,
         snippet_source: None,
@@ -191,9 +197,9 @@ fn merge_content_match(
     let snippet = build_snippet(&content_match.text, tokens);
     let content_score = (280_i64 - (rank as i64 * 7)).max(90);
 
-    let entry = combined
-        .entry(content_match.file_id)
-        .or_insert_with(|| SearchResult {
+    let entry = combined.entry(content_match.file_id).or_insert_with(|| {
+        let recency = recency_boost(content_match.modified_at.or(Some(content_match.indexed_at)));
+        SearchResult {
             file_id: content_match.file_id,
             root_id: content_match.root_id,
             name: content_match.name,
@@ -203,14 +209,21 @@ fn merge_content_match(
             size: content_match.size,
             modified_at: content_match.modified_at,
             indexed_at: content_match.indexed_at,
-            score: 0,
+            score: recency,
             semantic_score: None,
+            score_breakdown: finalize_breakdown(ScoreBreakdown {
+                recency,
+                ..ScoreBreakdown::default()
+            }),
             match_reasons: Vec::new(),
             snippet: None,
             snippet_source: None,
-        });
+        }
+    });
 
-    entry.score += content_score;
+    entry.score_breakdown.lexical += content_score;
+    entry.score_breakdown.total = total_score(&entry.score_breakdown);
+    entry.score = entry.score_breakdown.total;
     entry.match_reasons.push("text match".to_string());
 
     if entry.snippet.is_none() {
@@ -245,26 +258,40 @@ fn merge_semantic_match(
         combined
             .entry(semantic_match.file_id)
             .or_insert_with(|| match fallback_candidate {
-                Some(candidate) => SearchResult {
-                    file_id: candidate.file_id,
-                    root_id: candidate.root_id,
-                    name: candidate.name,
-                    path: candidate.path,
-                    extension: candidate.extension,
-                    kind: candidate.kind,
-                    size: candidate.size,
-                    modified_at: candidate.modified_at,
-                    indexed_at: candidate.indexed_at,
-                    score: 0,
-                    semantic_score: None,
-                    match_reasons: Vec::new(),
-                    snippet: None,
-                    snippet_source: None,
-                },
+                Some(candidate) => {
+                    let recency =
+                        recency_boost(candidate.modified_at.or(Some(candidate.indexed_at)));
+                    SearchResult {
+                        file_id: candidate.file_id,
+                        root_id: candidate.root_id,
+                        name: candidate.name,
+                        path: candidate.path,
+                        extension: candidate.extension,
+                        kind: candidate.kind,
+                        size: candidate.size,
+                        modified_at: candidate.modified_at,
+                        indexed_at: candidate.indexed_at,
+                        score: recency,
+                        semantic_score: None,
+                        score_breakdown: finalize_breakdown(ScoreBreakdown {
+                            recency,
+                            ..ScoreBreakdown::default()
+                        }),
+                        match_reasons: Vec::new(),
+                        snippet: None,
+                        snippet_source: None,
+                    }
+                }
                 None => unreachable!("semantic result without fallback candidate"),
             });
 
-    entry.score += semantic_score.max(60);
+    if modality == "image" {
+        entry.score_breakdown.semantic_image += semantic_score.max(60);
+    } else {
+        entry.score_breakdown.semantic_text += semantic_score.max(60);
+    }
+    entry.score_breakdown.total = total_score(&entry.score_breakdown);
+    entry.score = entry.score_breakdown.total;
     entry.semantic_score = Some(
         entry
             .semantic_score
@@ -291,6 +318,36 @@ fn compare_semantic_score(left: Option<f32>, right: Option<f32>) -> std::cmp::Or
         (None, Some(_)) => std::cmp::Ordering::Less,
         (None, None) => std::cmp::Ordering::Equal,
     }
+}
+
+fn recency_boost(timestamp: Option<i64>) -> i64 {
+    let Some(timestamp) = timestamp else {
+        return 0;
+    };
+
+    let age_seconds = unix_timestamp().saturating_sub(timestamp).max(0);
+    let age_days = age_seconds / 86_400;
+
+    match age_days {
+        0..=1 => 36,
+        2..=7 => 24,
+        8..=30 => 12,
+        31..=120 => 6,
+        _ => 0,
+    }
+}
+
+fn total_score(breakdown: &ScoreBreakdown) -> i64 {
+    breakdown.metadata
+        + breakdown.lexical
+        + breakdown.semantic_text
+        + breakdown.semantic_image
+        + breakdown.recency
+}
+
+fn finalize_breakdown(mut breakdown: ScoreBreakdown) -> ScoreBreakdown {
+    breakdown.total = total_score(&breakdown);
+    breakdown
 }
 
 fn tokenize(query: &str) -> Vec<String> {

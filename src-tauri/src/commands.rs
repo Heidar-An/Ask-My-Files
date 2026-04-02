@@ -18,13 +18,22 @@ pub fn list_index_roots(state: State<'_, AppState>) -> Result<Vec<IndexedRoot>, 
 pub fn add_index_root(path: String, state: State<'_, AppState>) -> Result<IndexedRoot, String> {
     let normalized = indexing::normalize_root_path(&path).map_err(err_to_string)?;
     let conn = state.connection().map_err(err_to_string)?;
-    storage::insert_or_update_root(&conn, &normalized, unix_timestamp()).map_err(err_to_string)
+    let root = storage::insert_or_update_root(&conn, &normalized, unix_timestamp())
+        .map_err(err_to_string)?;
+    state
+        .allow_preview_root(&normalized)
+        .map_err(err_to_string)?;
+    state.watch_service.watch_root(root.id, normalized);
+    Ok(root)
 }
 
 #[tauri::command]
 pub fn remove_index_root(root_id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    let _ = semantic::remove_root_embeddings(&state.vector_db_path, root_id);
     let conn = state.connection().map_err(err_to_string)?;
+    if let Some(path) = storage::lookup_root_path(&conn, root_id).map_err(err_to_string)? {
+        state.watch_service.unwatch_root(root_id, path);
+    }
+    let _ = semantic::remove_root_embeddings(&state.vector_db_path, root_id);
     storage::remove_root(&conn, root_id).map_err(err_to_string)
 }
 

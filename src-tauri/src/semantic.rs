@@ -1,4 +1,7 @@
-use crate::models::{SemanticMatch, SemanticSourceFile};
+use crate::{
+    extractors::ExtractionOutput,
+    models::{SemanticMatch, SemanticSourceFile},
+};
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{
     Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, RecordBatchIterator,
@@ -240,6 +243,45 @@ pub fn build_index_item(source: &SemanticSourceFile) -> Option<SemanticIndexItem
     }
 
     None
+}
+
+pub fn build_index_item_for_file(
+    file_id: i64,
+    root_id: i64,
+    path: &Path,
+    kind: &str,
+    content: Option<&ExtractionOutput>,
+) -> Option<SemanticIndexItem> {
+    let summary = content
+        .and_then(|output| output.chunks.first())
+        .and_then(|chunk| chunk.source_label.clone())
+        .or_else(|| Some(default_summary_for_kind(kind).to_string()));
+
+    let content_text = content.and_then(|output| {
+        let text = output
+            .chunks
+            .iter()
+            .take(6)
+            .map(|chunk| chunk.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    });
+
+    let source = SemanticSourceFile {
+        file_id,
+        root_id,
+        path: path.to_string_lossy().into_owned(),
+        kind: kind.to_string(),
+        summary,
+        content_text,
+    };
+
+    build_index_item(&source)
 }
 
 pub fn remove_root_embeddings(vector_db_path: &Path, root_id: i64) -> Result<()> {
@@ -538,6 +580,14 @@ fn validate_dimensions(embedding: &[f32]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn default_summary_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "image" => "Visual features",
+        "document" | "text" | "code" => "Semantic text preview",
+        _ => "Semantic preview",
+    }
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {

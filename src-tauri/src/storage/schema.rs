@@ -10,8 +10,11 @@ pub fn initialize_database(path: &Path) -> Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'idle',
+            sync_status TEXT NOT NULL DEFAULT 'idle',
             file_count INTEGER NOT NULL DEFAULT 0,
             last_indexed_at INTEGER,
+            last_synced_at INTEGER,
+            last_change_at INTEGER,
             last_error TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -78,6 +81,22 @@ pub fn initialize_database(path: &Path) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_file_extracts_status ON file_extracts(status);
         CREATE INDEX IF NOT EXISTS idx_file_semantic_index_status ON file_semantic_index(status);
         ",
+    )?;
+    let _ = conn.execute(
+        "ALTER TABLE indexed_roots ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'idle'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE indexed_roots ADD COLUMN last_synced_at INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE indexed_roots ADD COLUMN last_change_at INTEGER",
+        [],
+    );
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_indexed_roots_sync_status ON indexed_roots(sync_status)",
+        [],
     )?;
     Ok(())
 }

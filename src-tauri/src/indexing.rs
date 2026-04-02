@@ -17,9 +17,11 @@ use walkdir::WalkDir;
 const PROGRESS_UPDATE_EVERY: u64 = 25;
 const INDEX_BATCH_SIZE: usize = 32;
 const CONTENT_BACKFILL_BATCH_SIZE: usize = 12;
+const INCREMENTAL_SEMANTIC_BATCH_SIZE: usize = 48;
 
 struct PreparedFile {
     path: PathBuf,
+    kind: String,
     indexed_at: i64,
     size: i64,
     modified_at: Option<i64>,
@@ -55,6 +57,40 @@ pub fn spawn_index_job(
             &root_path,
         ) {
             let _ = storage::mark_job_failed(&db_path, root_id, job_id, &error.to_string());
+        }
+    });
+}
+
+pub fn spawn_incremental_sync_job(
+    db_path: PathBuf,
+    vector_db_path: PathBuf,
+    model_cache_dir: PathBuf,
+    root_id: i64,
+    root_path: String,
+    changed_paths: Vec<String>,
+    removed_paths: Vec<String>,
+) {
+    std::thread::spawn(move || {
+        if let Err(error) = run_incremental_sync_job(
+            &db_path,
+            &vector_db_path,
+            &model_cache_dir,
+            root_id,
+            &root_path,
+            &changed_paths,
+            &removed_paths,
+        ) {
+            if let Ok(conn) = storage::open_connection(&db_path) {
+                let _ = storage::mark_root_watch_state(&conn, root_id, "error", unix_timestamp());
+                let _ = storage::refresh_root_file_count(&conn, root_id, unix_timestamp());
+                let _ = conn.execute(
+                    "UPDATE indexed_roots
+                     SET last_error = ?2,
+                         updated_at = ?3
+                     WHERE id = ?1",
+                    rusqlite::params![root_id, error.to_string(), unix_timestamp()],
+                );
+            }
         }
     });
 }
@@ -179,6 +215,158 @@ pub fn run_index_job(
         job_id,
     );
 
+    Ok(())
+}
+
+fn run_incremental_sync_job(
+    db_path: &Path,
+    vector_db_path: &Path,
+    model_cache_dir: &Path,
+    root_id: i64,
+    root_path: &str,
+    changed_paths: &[String],
+    removed_paths: &[String],
+) -> Result<()> {
+    let root = PathBuf::from(root_path);
+    if !root.exists() {
+        return Err(anyhow!("folder does not exist anymore"));
+    }
+
+    let mut conn = storage::open_connection(db_path)?;
+    let now = unix_timestamp();
+    storage::mark_root_syncing(&conn, root_id, now)?;
+
+    let removed_file_ids = storage::fetch_file_ids_by_paths(&conn, root_id, removed_paths)?;
+    if !removed_file_ids.is_empty() {
+        let tx = conn.transaction()?;
+        storage::delete_files_by_ids(&tx, &removed_file_ids)?;
+        tx.commit()?;
+        let _ = semantic::remove_embeddings_for_files(vector_db_path, &removed_file_ids);
+    }
+
+    let normalized_changed_paths = changed_paths
+        .iter()
+        .filter_map(|path| {
+            let path = PathBuf::from(path);
+            if !path.exists() || !path.is_file() || !path.starts_with(&root) || is_ignored(&path) {
+                return None;
+            }
+            Some(path)
+        })
+        .collect::<Vec<_>>();
+
+    let existing_by_path = storage::fetch_file_snapshots_by_paths(
+        &conn,
+        root_id,
+        &normalized_changed_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )?
+    .into_iter()
+    .map(|snapshot| (snapshot.path.clone(), snapshot))
+    .collect::<HashMap<_, _>>();
+
+    let prepared_batch = normalized_changed_paths
+        .par_iter()
+        .map(|path| prepare_incremental_file(path))
+        .collect::<Vec<_>>();
+
+    let mut semantic_items = Vec::new();
+    let mut file_ids_to_requeue = removed_file_ids;
+
+    {
+        let tx = conn.transaction()?;
+        for prepared in &prepared_batch {
+            let path_string = prepared.path.to_string_lossy().into_owned();
+            let existing = existing_by_path.get(&path_string);
+            if is_unchanged(existing, prepared) {
+                continue;
+            }
+
+            let stored_file =
+                storage::index_file(&tx, root_id, &prepared.path, prepared.indexed_at)?;
+            file_ids_to_requeue.push(stored_file.file_id);
+            storage::replace_file_content(
+                &tx,
+                stored_file.file_id,
+                &prepared.content,
+                prepared.indexed_at,
+            )?;
+            storage::replace_semantic_record(
+                &tx,
+                stored_file.file_id,
+                &prepared.semantic_plan.status,
+                prepared.semantic_plan.modality.as_deref(),
+                None,
+                prepared.semantic_plan.summary.as_deref(),
+                prepared.indexed_at,
+                None,
+            )?;
+
+            if let Some(item) = semantic::build_index_item_for_file(
+                stored_file.file_id,
+                root_id,
+                &prepared.path,
+                &prepared.kind,
+                Some(&prepared.content),
+            ) {
+                semantic_items.push(item);
+            }
+        }
+        tx.commit()?;
+    }
+
+    if !file_ids_to_requeue.is_empty() {
+        let _ = semantic::remove_embeddings_for_files(vector_db_path, &file_ids_to_requeue);
+    }
+
+    if !semantic_items.is_empty() {
+        let mut handle = semantic::open_index_handle(vector_db_path)?;
+        for batch in semantic_items.chunks(INCREMENTAL_SEMANTIC_BATCH_SIZE) {
+            match semantic::index_batch_with_handle(&mut handle, model_cache_dir, batch) {
+                Ok(records) => {
+                    let tx = conn.transaction()?;
+                    let indexed_at = unix_timestamp();
+                    for record in records {
+                        storage::replace_semantic_record(
+                            &tx,
+                            record.file_id,
+                            &record.status,
+                            record.modality.as_deref(),
+                            record.model.as_deref(),
+                            record.summary.as_deref(),
+                            indexed_at,
+                            record.error_message.as_deref(),
+                        )?;
+                    }
+                    tx.commit()?;
+                }
+                Err(error) => {
+                    let tx = conn.transaction()?;
+                    let indexed_at = unix_timestamp();
+                    for item in batch {
+                        storage::replace_semantic_record(
+                            &tx,
+                            item.file_id,
+                            "error",
+                            Some(&item.modality),
+                            Some(semantic::semantic_model_name()),
+                            item.summary.as_deref(),
+                            indexed_at,
+                            Some(&error.to_string()),
+                        )?;
+                    }
+                    tx.commit()?;
+                    break;
+                }
+            }
+        }
+    }
+
+    let synced_at = unix_timestamp();
+    storage::refresh_root_file_count(&conn, root_id, synced_at)?;
+    storage::mark_root_synced(&conn, root_id, synced_at)?;
     Ok(())
 }
 
@@ -432,10 +620,39 @@ fn prepare_file(path: &Path) -> PreparedFile {
 
     PreparedFile {
         path: path.to_path_buf(),
+        kind: kind.clone(),
         indexed_at,
         size,
         modified_at,
         content: extractors::placeholder_output(&kind, &extension),
+        semantic_plan: semantic::prepare_semantic_plan(&kind),
+    }
+}
+
+fn prepare_incremental_file(path: &Path) -> PreparedFile {
+    let indexed_at = unix_timestamp();
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "unknown".to_string());
+    let kind = classify_kind(&extension).to_string();
+    let metadata = fs::metadata(path).ok();
+    let size = metadata
+        .as_ref()
+        .map(|metadata| metadata.len() as i64)
+        .unwrap_or(0);
+    let modified_at = metadata
+        .and_then(|metadata| metadata.modified().ok())
+        .map(crate::utils::system_time_to_timestamp);
+    let content = extractors::extract_file_text(path, &kind, &extension);
+
+    PreparedFile {
+        path: path.to_path_buf(),
+        kind: kind.clone(),
+        indexed_at,
+        size,
+        modified_at,
+        content,
         semantic_plan: semantic::prepare_semantic_plan(&kind),
     }
 }
@@ -465,7 +682,7 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn is_ignored(path: &Path) -> bool {
+pub(crate) fn is_ignored(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(|name| matches!(name, ".git" | "node_modules" | "target" | ".DS_Store"))

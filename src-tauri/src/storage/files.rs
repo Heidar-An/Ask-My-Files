@@ -132,6 +132,49 @@ pub fn fetch_root_file_snapshots(
     Ok(snapshots)
 }
 
+pub fn fetch_file_snapshots_by_paths(
+    conn: &Connection,
+    root_id: i64,
+    paths: &[String],
+) -> Result<Vec<ExistingFileSnapshot>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT id, path, size, modified_at
+         FROM files
+         WHERE root_id = ?1
+           AND path IN (",
+    );
+    sql.push_str(
+        &std::iter::repeat("?")
+            .take(paths.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push(')');
+
+    let mut values = vec![Value::Integer(root_id)];
+    values.extend(paths.iter().cloned().map(Value::Text));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+        Ok(ExistingFileSnapshot {
+            file_id: row.get(0)?,
+            path: row.get(1)?,
+            size: row.get(2)?,
+            modified_at: row.get(3)?,
+        })
+    })?;
+
+    let mut snapshots = Vec::new();
+    for row in rows {
+        snapshots.push(row?);
+    }
+    Ok(snapshots)
+}
+
 pub fn fetch_file_details(conn: &Connection, file_id: i64) -> Result<FileDetails> {
     let content_preview = super::fetch_content_preview(conn, file_id)?;
     let semantic_preview = super::fetch_semantic_preview(conn, file_id)?;
@@ -203,6 +246,42 @@ pub fn delete_files_by_ids(conn: &Connection, file_ids: &[i64]) -> Result<()> {
         .collect::<Vec<_>>();
     conn.execute(&sql, params_from_iter(values.iter()))?;
     Ok(())
+}
+
+pub fn fetch_file_ids_by_paths(
+    conn: &Connection,
+    root_id: i64,
+    paths: &[String],
+) -> Result<Vec<i64>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT id
+         FROM files
+         WHERE root_id = ?1
+           AND path IN (",
+    );
+    sql.push_str(
+        &std::iter::repeat("?")
+            .take(paths.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push(')');
+
+    let mut values = vec![Value::Integer(root_id)];
+    values.extend(paths.iter().cloned().map(Value::Text));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| row.get(0))?;
+
+    let mut file_ids = Vec::new();
+    for row in rows {
+        file_ids.push(row?);
+    }
+    Ok(file_ids)
 }
 
 pub fn index_file(
