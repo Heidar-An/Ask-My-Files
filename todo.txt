@@ -1,0 +1,8 @@
+- make settings page:
+   - gemini API key
+   - how often to refresh index
+   - whether to use qwen at all
+- don't show zoom in etc etc in the preview for each file, add a small expand button that pops up a dialog and then lets you look at the image in more detail
+- make landing page and deploy onto vercel
+- make demo video
+- publish to HN, linkedin, reddit and producthunt

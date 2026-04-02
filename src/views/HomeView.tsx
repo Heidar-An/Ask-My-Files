@@ -1,4 +1,5 @@
-import { panelClass, primaryButtonClass, SUGGESTIONS } from "../app/constants";
+import { useEffect, useState } from "react";
+import { panelClass, primaryButtonClass, SEARCH_PLACEHOLDERS, SUGGESTIONS } from "../app/constants";
 import type { FileDetails, IndexedRoot, SavedResult, ViewName } from "../app/types";
 import { SelectedFilePreview } from "../components/preview";
 import { DotsIcon, PinIcon, SparkleIcon, iconForKind, BookmarkIcon } from "../components/icons";
@@ -40,6 +41,20 @@ export function HomeView({
   onRemoveSavedResult,
   message,
 }: HomeViewProps) {
+  const [placeholderIdx, setPlaceholderIdx] = useState(0);
+  const [placeholderVisible, setPlaceholderVisible] = useState(true);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setPlaceholderVisible(false);
+      setTimeout(() => {
+        setPlaceholderIdx((i) => (i + 1) % SEARCH_PLACEHOLDERS.length);
+        setPlaceholderVisible(true);
+      }, 350);
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <div className="space-y-6">
       <section className="px-1 pt-2 text-center">
@@ -57,17 +72,27 @@ export function HomeView({
         <div className="mx-auto mt-8 max-w-5xl rounded-[28px] border border-black/5 bg-white/78 p-3 shadow-[0_22px_60px_rgba(85,93,122,0.08)]">
           <div className="flex flex-col gap-3 lg:flex-row">
             <div className="flex flex-1 items-center gap-4 rounded-[22px] bg-[#fcfbf8] px-5 py-4">
-              <SparkleIcon className="h-6 w-6 text-[#737792]" />
-              <input
-                className="w-full bg-transparent text-[1.15rem] text-[#222825] outline-none placeholder:text-[#9da2a6]"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                placeholder="Ask your workspace anything..."
-              />
+              <SparkleIcon className="h-6 w-6 shrink-0 text-[#737792]" />
+              <div className="relative min-w-0 flex-1">
+                <input
+                  className="w-full bg-transparent text-[1.15rem] text-[#222825] outline-none"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder=""
+                />
+                {query === "" && (
+                  <span
+                    className="pointer-events-none absolute inset-y-0 left-0 flex items-center text-[1.15rem] text-[#9da2a6] transition-opacity duration-300"
+                    style={{ opacity: placeholderVisible ? 1 : 0 }}
+                  >
+                    {SEARCH_PLACEHOLDERS[placeholderIdx]}
+                  </span>
+                )}
+              </div>
             </div>
             <button
               className={cx(primaryButtonClass, "min-w-[180px] rounded-[22px] px-6")}

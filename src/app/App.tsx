@@ -1,13 +1,12 @@
 import logoSrc from "../assets/logo.png";
-import { SEARCH_PLACEHOLDERS, panelClass, primaryButtonClass } from "./constants";
+import { panelClass, primaryButtonClass } from "./constants";
 import { useAppController } from "./useAppController";
-import { SidebarLink, TopChip } from "../components/navigation";
+import { SidebarLink } from "../components/navigation";
 import {
   DatabaseIcon,
   HomeIcon,
   PlusIcon,
   ResultsIcon,
-  SearchIcon,
   SettingsIcon,
   UserIcon,
 } from "../components/icons";
@@ -102,50 +101,6 @@ export function App() {
 
         <main className={cx(panelClass, "overflow-hidden")}>
           <div className="flex h-full flex-col">
-            <header className="border-b border-black/5 px-5 py-4 sm:px-7">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex min-w-0 flex-1 items-center gap-4">
-                  <div className="relative min-w-0 flex-1">
-                    <SearchIcon className="absolute left-5 top-1/2 h-5 w-5 -translate-y-1/2 text-[#7c8187]" />
-                    <input
-                      className="w-full rounded-[22px] border border-black/5 bg-[#f7f3ed] py-4 pl-14 pr-5 text-[1.02rem] text-[#1e2522] outline-none transition focus:border-[#d7d1c7] focus:bg-white focus:ring-4 focus:ring-[#7377921a]"
-                      value={state.query}
-                      onChange={(event) => actions.setQuery(event.target.value)}
-                      autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      placeholder={
-                        SEARCH_PLACEHOLDERS[
-                          Math.floor(Date.now() / 1000) % SEARCH_PLACEHOLDERS.length
-                        ]
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 text-sm text-[#6f757d]">
-                  <TopChip
-                    label="Workspace"
-                    active={state.currentView === "home" || state.currentView === "results"}
-                    onClick={() =>
-                      actions.setCurrentView(state.query.trim().length > 0 ? "results" : "home")
-                    }
-                  />
-                  <TopChip
-                    label="Sources"
-                    active={state.currentView === "sources"}
-                    onClick={() => actions.setCurrentView("sources")}
-                  />
-                  <TopChip
-                    label="Settings"
-                    active={state.currentView === "settings"}
-                    onClick={() => actions.setCurrentView("settings")}
-                  />
-                </div>
-              </div>
-            </header>
-
             <div className="min-h-0 flex-1 overflow-auto px-5 py-6 sm:px-7 sm:py-7">
               {state.currentView === "home" && (
                 <HomeView
