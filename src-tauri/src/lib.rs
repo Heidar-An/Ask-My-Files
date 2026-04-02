@@ -4,6 +4,7 @@ mod indexing;
 mod models;
 mod preview;
 mod search;
+mod semantic;
 mod shell;
 mod state;
 mod storage;

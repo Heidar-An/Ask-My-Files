@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use pdf_oxide::{parallel::extract_all_text_parallel, PdfDocument};
 use std::{
     fs,
     fs::File,
@@ -10,6 +11,7 @@ use zip::ZipArchive;
 const CHUNK_WORD_TARGET: usize = 180;
 const CHUNK_WORD_OVERLAP: usize = 45;
 const MIN_CHUNK_CHARS: usize = 20;
+const PDF_PARALLEL_PAGE_THRESHOLD: usize = 48;
 
 #[derive(Debug, Clone)]
 pub struct TextChunk {
@@ -26,6 +28,24 @@ pub struct ExtractionOutput {
     pub error_message: Option<String>,
 }
 
+pub fn placeholder_output(kind: &str, extension: &str) -> ExtractionOutput {
+    if supports_content_extraction(kind, extension) {
+        ExtractionOutput {
+            status: "pending".to_string(),
+            extractor: Some(extractor_name(extension, kind).to_string()),
+            text_length: 0,
+            chunks: Vec::new(),
+            error_message: None,
+        }
+    } else {
+        unsupported_output()
+    }
+}
+
+pub fn supports_content_extraction(kind: &str, extension: &str) -> bool {
+    matches!(extension, "pdf" | "docx" | "pptx" | "xlsx") || matches!(kind, "text" | "code")
+}
+
 pub fn extract_file_text(path: &Path, kind: &str, extension: &str) -> ExtractionOutput {
     let result = match extension {
         "pdf" => extract_pdf(path),
@@ -37,7 +57,7 @@ pub fn extract_file_text(path: &Path, kind: &str, extension: &str) -> Extraction
     };
 
     match result {
-        Ok(sections) => build_output(sections),
+        Ok(sections) => build_output(sections, extractor_name(extension, kind)),
         Err(error) => ExtractionOutput {
             status: "error".to_string(),
             extractor: Some(extractor_name(extension, kind).to_string()),
@@ -59,8 +79,30 @@ fn extract_plain_text(path: &Path) -> Result<Vec<(Option<String>, String)>> {
 }
 
 fn extract_pdf(path: &Path) -> Result<Vec<(Option<String>, String)>> {
-    let pages = pdf_extract::extract_text_by_pages(path)
-        .with_context(|| format!("failed to extract pdf text from {}", path.display()))?;
+    let mut document = PdfDocument::open(path)
+        .with_context(|| format!("failed to open pdf {}", path.display()))?;
+    let page_count = document
+        .page_count()
+        .with_context(|| format!("failed to read pdf page count for {}", path.display()))?;
+
+    let pages = if page_count >= PDF_PARALLEL_PAGE_THRESHOLD {
+        drop(document);
+        extract_all_text_parallel(path)
+            .with_context(|| format!("failed to extract pdf text from {}", path.display()))?
+    } else {
+        let mut pages = Vec::with_capacity(page_count);
+        for page_index in 0..page_count {
+            let page_text = document.extract_text(page_index).with_context(|| {
+                format!(
+                    "failed to extract pdf text from {} page {}",
+                    path.display(),
+                    page_index + 1
+                )
+            })?;
+            pages.push(page_text);
+        }
+        pages
+    };
 
     Ok(pages
         .into_iter()
@@ -189,7 +231,7 @@ fn read_zip_entry(archive: &mut ZipArchive<File>, entry_name: &str) -> Result<St
     Ok(buffer)
 }
 
-fn build_output(sections: Vec<(Option<String>, String)>) -> ExtractionOutput {
+fn build_output(sections: Vec<(Option<String>, String)>, extractor: &str) -> ExtractionOutput {
     let mut chunks = Vec::new();
     for (source_label, text) in sections {
         chunks.extend(chunk_text(source_label, &text));
@@ -211,7 +253,7 @@ fn build_output(sections: Vec<(Option<String>, String)>) -> ExtractionOutput {
 
     ExtractionOutput {
         status: "indexed".to_string(),
-        extractor: Some("phase2-extractor".to_string()),
+        extractor: Some(extractor.to_string()),
         text_length,
         chunks,
         error_message: None,
@@ -230,7 +272,7 @@ fn unsupported_output() -> ExtractionOutput {
 
 fn extractor_name(extension: &str, kind: &str) -> &'static str {
     match extension {
-        "pdf" => "pdf-extract",
+        "pdf" => "pdf_oxide",
         "docx" | "pptx" | "xlsx" => "ooxml-zip",
         _ if matches!(kind, "text" | "code") => "plain-text",
         _ => "unsupported",

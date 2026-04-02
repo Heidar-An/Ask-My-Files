@@ -52,6 +52,16 @@ pub fn initialize_database(path: &Path) -> Result<()> {
             error_message TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS file_semantic_index (
+            file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            modality TEXT,
+            model TEXT,
+            summary TEXT,
+            updated_at INTEGER NOT NULL,
+            error_message TEXT
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS file_text_chunks USING fts5(
             file_id UNINDEXED,
             chunk_index UNINDEXED,
@@ -66,6 +76,7 @@ pub fn initialize_database(path: &Path) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at DESC);
         CREATE INDEX IF NOT EXISTS idx_index_jobs_root_id ON index_jobs(root_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_file_extracts_status ON file_extracts(status);
+        CREATE INDEX IF NOT EXISTS idx_file_semantic_index_status ON file_semantic_index(status);
         ",
     )?;
     Ok(())

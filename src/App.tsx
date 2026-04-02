@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import logoSrc from "./assets/logo.png";
 
 type IndexedRoot = {
   id: number;
   path: string;
   status: string;
   fileCount: number;
+  contentIndexedCount: number;
+  contentPendingCount: number;
+  semanticIndexedCount: number;
+  semanticPendingCount: number;
   lastIndexedAt: number | null;
   lastError: string | null;
 };
@@ -35,6 +40,7 @@ type SearchResult = {
   modifiedAt: number | null;
   indexedAt: number;
   score: number;
+  semanticScore: number | null;
   matchReasons: string[];
   snippet: string | null;
   snippetSource: string | null;
@@ -56,6 +62,11 @@ type FileDetails = {
   contentSnippet: string | null;
   contentSource: string | null;
   extractionError: string | null;
+  semanticStatus: string | null;
+  semanticModality: string | null;
+  semanticModel: string | null;
+  semanticSummary: string | null;
+  semanticError: string | null;
 };
 
 type SearchRequest = {
@@ -109,7 +120,26 @@ export function App() {
     (status) => status.status === "running",
   ).length;
   const totalFiles = roots.reduce((total, root) => total + root.fileCount, 0);
+  const totalContentIndexed = roots.reduce(
+    (total, root) => total + root.contentIndexedCount,
+    0,
+  );
+  const totalContentPending = roots.reduce(
+    (total, root) => total + root.contentPendingCount,
+    0,
+  );
+  const totalSemanticIndexed = roots.reduce(
+    (total, root) => total + root.semanticIndexedCount,
+    0,
+  );
+  const totalSemanticPending = roots.reduce(
+    (total, root) => total + root.semanticPendingCount,
+    0,
+  );
   const activeRootCount = roots.filter((root) => root.status === "ready").length;
+  const enrichingRootCount = roots.filter(
+    (root) => root.contentPendingCount > 0 || root.semanticPendingCount > 0,
+  ).length;
   const selectedPreviewUrl =
     selectedFile?.previewPath ? convertFileSrc(selectedFile.previewPath) : null;
   const featuredResult = results[0] ?? null;
@@ -119,6 +149,8 @@ export function App() {
   const currentStatusText =
     runningIndexCount > 0
       ? `${runningIndexCount} source${runningIndexCount === 1 ? "" : "s"} indexing`
+      : enrichingRootCount > 0
+        ? `${enrichingRootCount} source${enrichingRootCount === 1 ? "" : "s"} enriching`
       : activeRootCount > 0
         ? "Index is active"
         : "Waiting for sources";
@@ -326,12 +358,10 @@ export function App() {
       <div className="grid min-h-[calc(100dvh-2rem)] grid-cols-1 gap-4 xl:grid-cols-[290px_minmax(0,1fr)]">
         <aside className={cx(panelClass, "flex flex-col overflow-hidden p-5")}>
           <div className="flex items-start gap-4">
-            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[#737792] text-white shadow-[0_12px_24px_rgba(115,119,146,0.24)]">
-              <LogoGlyph />
-            </div>
+            <img src={logoSrc} alt="Mira" className="h-12 w-12 shrink-0 rounded-2xl object-cover" />
             <div>
               <p className="display-type text-[1.1rem] leading-6 text-[#1d2320]">
-                AskMyFiles
+                Mira
               </p>
               <p className="mt-1 text-sm tracking-[0.16em] text-[#80858a] uppercase">
                 AI-powered search
@@ -382,8 +412,10 @@ export function App() {
             </p>
             <p className="mt-2 text-sm leading-6 text-[#68716d]">
               {runningIndexCount > 0
-                ? "Indexing is happening in the background and results will improve as new files are processed."
-                : "Your local workspace is ready for filename and extracted-text search."}
+                ? "Metadata indexing is happening in the background and deeper passes will continue afterward."
+                : enrichingRootCount > 0
+                  ? "Metadata is ready, while content extraction and semantic enrichment are still catching up."
+                  : "Your local workspace is ready for metadata, extracted-text, and visual-semantic search."}
             </p>
           </div>
 
@@ -393,7 +425,7 @@ export function App() {
                 <UserIcon />
               </div>
               <div>
-                <p className="font-medium text-[#1d2320]">AskMyFiles</p>
+                <p className="font-medium text-[#1d2320]">Mira</p>
                 <p className="text-sm text-[#7b8280]">
                   {activeRootCount} active source{activeRootCount === 1 ? "" : "s"}
                 </p>
@@ -479,6 +511,10 @@ export function App() {
                   roots={roots}
                   statuses={statuses}
                   totalFiles={totalFiles}
+                  totalContentIndexed={totalContentIndexed}
+                  totalContentPending={totalContentPending}
+                  totalSemanticIndexed={totalSemanticIndexed}
+                  totalSemanticPending={totalSemanticPending}
                   runningIndexCount={runningIndexCount}
                   selectedRootIds={selectedRootIds}
                   toggleRoot={toggleRoot}
@@ -538,8 +574,8 @@ function HomeView({
           Search your files in plain English.
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-[1.1rem] leading-8 text-[#6b726e]">
-          AskMyFiles turns folders into a searchable workspace so you can find documents,
-          images, and text-heavy files without remembering exact filenames.
+          Mira turns folders into a searchable workspace so you can find documents,
+          images, and text-heavy files — without remembering exact filenames.
         </p>
 
         <div className="mx-auto mt-8 max-w-5xl rounded-[28px] border border-black/5 bg-white/78 p-3 shadow-[0_22px_60px_rgba(85,93,122,0.08)]">
@@ -622,7 +658,7 @@ function HomeView({
               <OverviewCard
                 label="Search coverage"
                 value={roots.length === 0 ? "0%" : `${Math.min(99, 44 + roots.length * 9)}%`}
-                meta="Filename + extracted text"
+                meta="Filename + extracted text + local CLIP embeddings"
               />
               <OverviewCard
                 label="Indexer status"
@@ -673,15 +709,11 @@ function HomeView({
             </p>
             {selectedFile ? (
               <div className="mt-4 space-y-4">
-                {selectedPreviewUrl ? (
-                  <div className="overflow-hidden rounded-[20px] bg-[#eef0f6]">
-                    <img src={selectedPreviewUrl} alt={selectedFile.name} className="h-48 w-full object-cover" />
-                  </div>
-                ) : (
-                  <div className="grid h-48 place-items-center rounded-[20px] bg-[#eef0f6] text-[#737792]">
-                    {iconForKind(selectedFile.kind)}
-                  </div>
-                )}
+                <SelectedFilePreview
+                  file={selectedFile}
+                  previewUrl={selectedPreviewUrl}
+                  className="h-48 rounded-[20px]"
+                />
                 <div>
                   <p className="display-type text-[1.35rem] leading-8 text-[#222825]">
                     {selectedFile.name}
@@ -755,7 +787,7 @@ function ResultsView({
             <p className="mt-4 flex flex-wrap items-center gap-3 text-[1.05rem] text-[#686f6c]">
               <span className="inline-flex items-center gap-2 text-[#272d2a]">
                 <SparkleIcon className="h-5 w-5 text-[#737792]" />
-                AI semantic matches
+                Hybrid lexical + visual matches
               </span>
               <span className="rounded-full bg-[#eaecf8] px-3 py-1 text-[0.72rem] uppercase tracking-[0.14em] text-[#5d647f]">
                 High confidence
@@ -852,6 +884,16 @@ function ResultsView({
                   <p className="mt-4 text-sm leading-6 text-[#666d6a]">
                     {result.snippet ?? shortPath(result.path)}
                   </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {result.matchReasons.slice(0, 2).map((reason) => (
+                      <span
+                        key={`${result.fileId}-${reason}`}
+                        className="rounded-full bg-[#f3f1ea] px-2.5 py-1 text-[0.68rem] uppercase tracking-[0.12em] text-[#686f88]"
+                      >
+                        {reason}
+                      </span>
+                    ))}
+                  </div>
                 </button>
               ))}
             </aside>
@@ -884,6 +926,16 @@ function ResultsView({
                       <p className="mt-2 text-sm leading-6 text-[#666d6a]">
                         {result.snippet ?? result.path}
                       </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {result.matchReasons.slice(0, 3).map((reason) => (
+                          <span
+                            key={`${result.fileId}-${reason}`}
+                            className="rounded-full bg-[#f3f1ea] px-2.5 py-1 text-[0.68rem] uppercase tracking-[0.12em] text-[#686f88]"
+                          >
+                            {reason}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   </button>
                 ))}
@@ -895,22 +947,18 @@ function ResultsView({
                 <h3 className="display-type text-[1.6rem] text-[#202724]">Selected file</h3>
                 {selectedFile ? (
                   <span className="rounded-full bg-[#eff0f8] px-3 py-1 text-[0.72rem] uppercase tracking-[0.14em] text-[#676e88]">
-                    {contentStatusLabel(selectedFile.contentStatus)}
+                    {detailStatusLabel(selectedFile)}
                   </span>
                 ) : null}
               </div>
 
               {selectedFile ? (
                 <div className="mt-5 space-y-5">
-                  {selectedPreviewUrl ? (
-                    <div className="overflow-hidden rounded-[24px] bg-[#eef0f6]">
-                      <img src={selectedPreviewUrl} alt={selectedFile.name} className="h-60 w-full object-cover" />
-                    </div>
-                  ) : (
-                    <div className="grid h-60 place-items-center rounded-[24px] bg-[#eef0f6] text-[#737792]">
-                      {iconForKind(selectedFile.kind)}
-                    </div>
-                  )}
+                  <SelectedFilePreview
+                    file={selectedFile}
+                    previewUrl={selectedPreviewUrl}
+                    className="h-60 rounded-[24px]"
+                  />
 
                   <div>
                     <p className="display-type text-[1.8rem] leading-tight text-[#202724]">
@@ -918,6 +966,7 @@ function ResultsView({
                     </p>
                     <p className="mt-3 text-sm leading-7 text-[#666d6a]">
                       {selectedFile.contentSnippet ??
+                        selectedFile.semanticSummary ??
                         "This file is available in your workspace. Use the actions below to open or reveal it."}
                     </p>
                   </div>
@@ -932,6 +981,12 @@ function ResultsView({
                         selectedFile.modifiedAt ? formatDate(selectedFile.modifiedAt) : "Unknown"
                       }
                     />
+                    {selectedFile.semanticModality ? (
+                      <InfoRow label="Semantic mode" value={selectedFile.semanticModality} />
+                    ) : null}
+                    {selectedFile.semanticModel ? (
+                      <InfoRow label="Semantic model" value={selectedFile.semanticModel} />
+                    ) : null}
                     {selectedFile.contentSource ? (
                       <InfoRow label="Snippet source" value={selectedFile.contentSource} />
                     ) : null}
@@ -940,6 +995,11 @@ function ResultsView({
                   {selectedFile.extractionError ? (
                     <div className="rounded-[20px] bg-[#fff3ef] px-4 py-3 text-sm text-[color:var(--danger)]">
                       {selectedFile.extractionError}
+                    </div>
+                  ) : null}
+                  {selectedFile.semanticError ? (
+                    <div className="rounded-[20px] bg-[#fff7e8] px-4 py-3 text-sm text-[#8b6322]">
+                      {selectedFile.semanticError}
                     </div>
                   ) : null}
 
@@ -971,6 +1031,10 @@ function SourcesView({
   roots,
   statuses,
   totalFiles,
+  totalContentIndexed,
+  totalContentPending,
+  totalSemanticIndexed,
+  totalSemanticPending,
   runningIndexCount,
   selectedRootIds,
   toggleRoot,
@@ -982,6 +1046,10 @@ function SourcesView({
   roots: IndexedRoot[];
   statuses: Record<number, IndexStatus>;
   totalFiles: number;
+  totalContentIndexed: number;
+  totalContentPending: number;
+  totalSemanticIndexed: number;
+  totalSemanticPending: number;
   runningIndexCount: number;
   selectedRootIds: number[];
   toggleRoot: (rootId: number) => void;
@@ -1016,20 +1084,37 @@ function SourcesView({
       </section>
 
       <section className="grid gap-4 xl:grid-cols-3">
-        <MetricPanel title="Total indexed" value={formatCompact(totalFiles)} note={`${roots.length} sources connected`} bar={70} />
         <MetricPanel
-          title="Files processed"
-          value={totalFiles.toLocaleString()}
-          note={`${runningIndexCount} live job${runningIndexCount === 1 ? "" : "s"}`}
+          title="Metadata indexed"
+          value={formatCompact(totalFiles)}
+          note={`${roots.length} sources connected`}
+          bar={100}
+        />
+        <MetricPanel
+          title="Content extracted"
+          value={formatPassValue(
+            totalContentIndexed,
+            totalContentIndexed + totalContentPending,
+          )}
+          note={
+            totalContentPending > 0
+              ? `${totalContentPending.toLocaleString()} files still waiting for text extraction`
+              : "All supported files are content-searchable"
+          }
           segmented
         />
         <MetricPanel
-          title="Sync status"
-          value={runningIndexCount > 0 ? "Active" : "Ready"}
+          title="Semantic enriched"
+          value={formatPassValue(
+            totalSemanticIndexed,
+            totalSemanticIndexed + totalSemanticPending,
+          )}
           note={
             runningIndexCount > 0
-              ? "Background indexing in progress"
-              : "Last update just completed"
+              ? "Fast metadata pass is still running"
+              : totalSemanticPending > 0
+                ? `${totalSemanticPending.toLocaleString()} files still waiting for semantic enrichment`
+                : "Semantic enrichment is up to date"
           }
           indicator
         />
@@ -1049,12 +1134,14 @@ function SourcesView({
           {roots.length > 0 ? (
             roots.map((root) => {
               const status = statuses[root.id];
-              const progress =
+              const metadataProgress =
                 status && status.total > 0
                   ? Math.round((status.processed / status.total) * 100)
                   : root.status === "ready"
                     ? 100
                     : 0;
+              const contentTotal = root.contentIndexedCount + root.contentPendingCount;
+              const semanticTotal = root.semanticIndexedCount + root.semanticPendingCount;
 
               return (
                 <article
@@ -1086,25 +1173,35 @@ function SourcesView({
 
                     <div className="mt-4">
                       <div className="flex items-center justify-between gap-3 text-sm text-[#70767a]">
-                        <span>Indexing progress</span>
-                        <span>
-                          {status && status.status === "running"
-                            ? `${progress}%`
-                            : root.status === "ready"
-                              ? "100%"
-                              : "Queued"}
-                        </span>
+                        <span>Pipeline progress</span>
+                        <span>{rootPipelineLabel(root, status)}</span>
                       </div>
-                      <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-[#e5e6ea]">
-                        <div
-                          className="h-full rounded-full bg-[#737792]"
-                          style={{ width: `${Math.max(progress, root.status === "ready" ? 100 : 8)}%` }}
+                      <div className="mt-3 space-y-3">
+                        <PassProgressRow
+                          label="Metadata"
+                          value={`${status && status.status === "running" ? metadataProgress : root.fileCount > 0 ? 100 : 0}%`}
+                          progress={status && status.status === "running" ? metadataProgress : root.fileCount > 0 ? 100 : 0}
+                          tone="primary"
+                        />
+                        <PassProgressRow
+                          label="Content"
+                          value={formatPassValue(root.contentIndexedCount, contentTotal)}
+                          progress={stagePercent(root.contentIndexedCount, contentTotal)}
+                          tone="secondary"
+                        />
+                        <PassProgressRow
+                          label="Semantic"
+                          value={formatPassValue(root.semanticIndexedCount, semanticTotal)}
+                          progress={stagePercent(root.semanticIndexedCount, semanticTotal)}
+                          tone="muted"
                         />
                       </div>
                     </div>
 
                     <div className="mt-4 flex flex-wrap gap-4 text-sm text-[#6d7470]">
                       <span>{root.fileCount.toLocaleString()} files</span>
+                      <span>{root.contentIndexedCount.toLocaleString()} content-ready</span>
+                      <span>{root.semanticIndexedCount.toLocaleString()} semantic-ready</span>
                       <span>{root.lastIndexedAt ? formatDate(root.lastIndexedAt) : "Not indexed yet"}</span>
                       {status?.currentPath ? <span className="truncate">{status.currentPath}</span> : null}
                     </div>
@@ -1306,6 +1403,40 @@ function MetricPanel({
   );
 }
 
+function PassProgressRow({
+  label,
+  value,
+  progress,
+  tone,
+}: {
+  label: string;
+  value: string;
+  progress: number;
+  tone: "primary" | "secondary" | "muted";
+}) {
+  const fillClass =
+    tone === "primary"
+      ? "bg-[#737792]"
+      : tone === "secondary"
+        ? "bg-[#8e93ad]"
+        : "bg-[#c8ccd9]";
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 text-sm text-[#70767a]">
+        <span>{label}</span>
+        <span>{value}</span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#e5e6ea]">
+        <div
+          className={cx("h-full rounded-full transition-[width]", fillClass)}
+          style={{ width: `${Math.max(progress, progress > 0 ? 6 : 0)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-1">
@@ -1313,6 +1444,60 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <dd className="break-words text-[#252c29]">{value}</dd>
     </div>
   );
+}
+
+function SelectedFilePreview({
+  file,
+  previewUrl,
+  className,
+}: {
+  file: FileDetails;
+  previewUrl: string | null;
+  className: string;
+}) {
+  const previewType = getPreviewType(file, previewUrl);
+
+  if (previewType === "image") {
+    return (
+      <div className={cx("overflow-hidden bg-[#eef0f6]", className)}>
+        <img src={previewUrl ?? undefined} alt={file.name} className="h-full w-full object-cover" />
+      </div>
+    );
+  }
+
+  if (previewType === "pdf") {
+    return (
+      <div className={cx("overflow-hidden bg-[#eef0f6]", className)}>
+        <iframe
+          src={previewUrl ?? undefined}
+          title={file.name}
+          className="h-full w-full border-0 bg-white"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={cx("grid place-items-center bg-[#eef0f6] text-[#737792]", className)}>
+      {iconForKind(file.kind)}
+    </div>
+  );
+}
+
+function getPreviewType(file: FileDetails, previewUrl: string | null) {
+  if (!previewUrl) {
+    return "none";
+  }
+
+  if (file.kind === "image") {
+    return "image";
+  }
+
+  if (file.extension.toLowerCase() === "pdf") {
+    return "pdf";
+  }
+
+  return "none";
 }
 
 function statusLabel(status: string) {
@@ -1341,6 +1526,42 @@ function statusPillClass(status: string) {
   }
 }
 
+function stagePercent(indexed: number, total: number) {
+  if (total <= 0) {
+    return 100;
+  }
+
+  return Math.round((indexed / total) * 100);
+}
+
+function formatPassValue(indexed: number, total: number) {
+  if (total <= 0) {
+    return "n/a";
+  }
+
+  return `${indexed.toLocaleString()} / ${total.toLocaleString()}`;
+}
+
+function rootPipelineLabel(root: IndexedRoot, status?: IndexStatus) {
+  if (status?.status === "running") {
+    return "Scanning metadata";
+  }
+
+  if (root.contentPendingCount > 0) {
+    return "Extracting content";
+  }
+
+  if (root.semanticPendingCount > 0) {
+    return "Enriching semantics";
+  }
+
+  if (root.fileCount > 0) {
+    return "All passes complete";
+  }
+
+  return "Queued";
+}
+
 function contentStatusLabel(status: string | null) {
   switch (status) {
     case "indexed":
@@ -1354,6 +1575,29 @@ function contentStatusLabel(status: string | null) {
     default:
       return "Pending";
   }
+}
+
+function semanticStatusLabel(status: string | null) {
+  switch (status) {
+    case "indexed":
+      return "Semantic ready";
+    case "empty":
+      return "No semantic text";
+    case "error":
+      return "Semantic error";
+    case "unsupported":
+      return "Metadata only";
+    default:
+      return "Semantic pending";
+  }
+}
+
+function detailStatusLabel(file: FileDetails) {
+  if (file.semanticStatus && file.semanticStatus !== "unsupported") {
+    return semanticStatusLabel(file.semanticStatus);
+  }
+
+  return contentStatusLabel(file.contentStatus);
 }
 
 function kindLabel(kind: string) {
@@ -1439,15 +1683,6 @@ function iconForKind(kind: string) {
     default:
       return <DocumentIcon />;
   }
-}
-
-function LogoGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5">
-      <path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3Z" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M12 8.5v7M8.5 12h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
 }
 
 function HomeIcon() {

@@ -1,19 +1,30 @@
-use crate::{extractors, storage, utils::unix_timestamp};
+use crate::{
+    extractors,
+    models::ExistingFileSnapshot,
+    semantic::{self, SemanticPlan},
+    storage,
+    utils::unix_timestamp,
+};
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
 const PROGRESS_UPDATE_EVERY: u64 = 25;
-const EXTRACTION_BATCH_SIZE: usize = 8;
+const INDEX_BATCH_SIZE: usize = 32;
+const CONTENT_BACKFILL_BATCH_SIZE: usize = 12;
 
 struct PreparedFile {
     path: PathBuf,
     indexed_at: i64,
+    size: i64,
+    modified_at: Option<i64>,
     content: extractors::ExtractionOutput,
+    semantic_plan: SemanticPlan,
 }
 
 pub fn normalize_root_path(path: &str) -> Result<String> {
@@ -26,15 +37,36 @@ pub fn normalize_root_path(path: &str) -> Result<String> {
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-pub fn spawn_index_job(db_path: PathBuf, root_id: i64, job_id: i64, root_path: String) {
+pub fn spawn_index_job(
+    db_path: PathBuf,
+    vector_db_path: PathBuf,
+    model_cache_dir: PathBuf,
+    root_id: i64,
+    job_id: i64,
+    root_path: String,
+) {
     std::thread::spawn(move || {
-        if let Err(error) = run_index_job(&db_path, root_id, job_id, &root_path) {
+        if let Err(error) = run_index_job(
+            &db_path,
+            &vector_db_path,
+            &model_cache_dir,
+            root_id,
+            job_id,
+            &root_path,
+        ) {
             let _ = storage::mark_job_failed(&db_path, root_id, job_id, &error.to_string());
         }
     });
 }
 
-pub fn run_index_job(db_path: &Path, root_id: i64, job_id: i64, root_path: &str) -> Result<()> {
+pub fn run_index_job(
+    db_path: &Path,
+    vector_db_path: &Path,
+    model_cache_dir: &Path,
+    root_id: i64,
+    job_id: i64,
+    root_path: &str,
+) -> Result<()> {
     let root = PathBuf::from(root_path);
     if !root.exists() {
         return Err(anyhow!("folder does not exist anymore"));
@@ -45,17 +77,33 @@ pub fn run_index_job(db_path: &Path, root_id: i64, job_id: i64, root_path: &str)
     storage::update_job_progress(db_path, root_id, job_id, 0, total, None)?;
 
     let mut conn = storage::open_connection(db_path)?;
-    {
+    let existing_by_path = storage::fetch_root_file_snapshots(&conn, root_id)?
+        .into_iter()
+        .map(|snapshot| (snapshot.path.clone(), snapshot))
+        .collect::<HashMap<_, _>>();
+
+    let current_paths = files
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<HashSet<_>>();
+    let removed_file_ids = existing_by_path
+        .values()
+        .filter(|snapshot| !current_paths.contains(&snapshot.path))
+        .map(|snapshot| snapshot.file_id)
+        .collect::<Vec<_>>();
+
+    if !removed_file_ids.is_empty() {
         let tx = conn.transaction()?;
-        storage::clear_content_for_root(&tx, root_id)?;
-        storage::delete_files_for_root(&tx, root_id)?;
+        storage::delete_files_by_ids(&tx, &removed_file_ids)?;
         tx.commit()?;
+        let _ = semantic::remove_embeddings_for_files(vector_db_path, &removed_file_ids);
     }
 
     let mut processed = 0_u64;
     let mut last_error: Option<String> = None;
+    let mut changed_file_ids = Vec::<i64>::new();
 
-    for batch in files.chunks(EXTRACTION_BATCH_SIZE) {
+    for batch in files.chunks(INDEX_BATCH_SIZE) {
         let prepared_batch = batch
             .par_iter()
             .map(|path| prepare_file(path))
@@ -63,13 +111,35 @@ pub fn run_index_job(db_path: &Path, root_id: i64, job_id: i64, root_path: &str)
 
         let tx = conn.transaction()?;
         for prepared in &prepared_batch {
+            let path_string = prepared.path.to_string_lossy().into_owned();
+            let existing = existing_by_path.get(&path_string);
+
+            if is_unchanged(existing, prepared) {
+                continue;
+            }
+
             match storage::index_file(&tx, root_id, &prepared.path, prepared.indexed_at) {
                 Ok(stored_file) => {
+                    changed_file_ids.push(stored_file.file_id);
+
                     if let Err(error) = storage::replace_file_content(
                         &tx,
                         stored_file.file_id,
                         &prepared.content,
                         prepared.indexed_at,
+                    ) {
+                        last_error = Some(error.to_string());
+                    }
+
+                    if let Err(error) = storage::replace_semantic_record(
+                        &tx,
+                        stored_file.file_id,
+                        &prepared.semantic_plan.status,
+                        prepared.semantic_plan.modality.as_deref(),
+                        None,
+                        prepared.semantic_plan.summary.as_deref(),
+                        prepared.indexed_at,
+                        None,
                     ) {
                         last_error = Some(error.to_string());
                     }
@@ -93,6 +163,22 @@ pub fn run_index_job(db_path: &Path, root_id: i64, job_id: i64, root_path: &str)
     }
 
     storage::update_root_ready(&conn, root_id, job_id, processed, total, last_error)?;
+    drop(conn);
+
+    let mut file_ids_to_requeue = changed_file_ids;
+    file_ids_to_requeue.extend(removed_file_ids);
+    if !file_ids_to_requeue.is_empty() {
+        let _ = semantic::remove_embeddings_for_files(vector_db_path, &file_ids_to_requeue);
+    }
+
+    spawn_content_backfill_job(
+        db_path.to_path_buf(),
+        vector_db_path.to_path_buf(),
+        model_cache_dir.to_path_buf(),
+        root_id,
+        job_id,
+    );
+
     Ok(())
 }
 
@@ -110,20 +196,212 @@ pub fn classify_kind(extension: &str) -> &'static str {
     }
 }
 
+fn spawn_content_backfill_job(
+    db_path: PathBuf,
+    vector_db_path: PathBuf,
+    model_cache_dir: PathBuf,
+    root_id: i64,
+    job_id: i64,
+) {
+    std::thread::spawn(move || {
+        let _ =
+            run_content_backfill_job(&db_path, &vector_db_path, &model_cache_dir, root_id, job_id);
+    });
+}
+
+fn run_content_backfill_job(
+    db_path: &Path,
+    vector_db_path: &Path,
+    model_cache_dir: &Path,
+    root_id: i64,
+    job_id: i64,
+) -> Result<()> {
+    let mut conn = storage::open_connection(db_path)?;
+    if !job_is_current(&conn, root_id, job_id)? {
+        return Ok(());
+    }
+
+    let candidates = storage::fetch_content_backfill_candidates(&conn, root_id)?;
+    if candidates.is_empty() {
+        drop(conn);
+        spawn_semantic_backfill_job(
+            db_path.to_path_buf(),
+            vector_db_path.to_path_buf(),
+            model_cache_dir.to_path_buf(),
+            root_id,
+            job_id,
+        );
+        return Ok(());
+    }
+
+    for batch in candidates.chunks(CONTENT_BACKFILL_BATCH_SIZE) {
+        if !job_is_current(&conn, root_id, job_id)? {
+            return Ok(());
+        }
+
+        let extracted_batch = batch
+            .par_iter()
+            .map(|candidate| {
+                let path = PathBuf::from(&candidate.path);
+                let output =
+                    extractors::extract_file_text(&path, &candidate.kind, &candidate.extension);
+                (candidate.file_id, output)
+            })
+            .collect::<Vec<_>>();
+
+        let tx = conn.transaction()?;
+        for (file_id, output) in extracted_batch {
+            storage::replace_file_content(&tx, file_id, &output, unix_timestamp())?;
+            if output.status != "indexed" {
+                storage::replace_semantic_record(
+                    &tx,
+                    file_id,
+                    &output.status,
+                    Some("text"),
+                    None,
+                    None,
+                    unix_timestamp(),
+                    output.error_message.as_deref(),
+                )?;
+            }
+        }
+        tx.commit()?;
+    }
+
+    drop(conn);
+    spawn_semantic_backfill_job(
+        db_path.to_path_buf(),
+        vector_db_path.to_path_buf(),
+        model_cache_dir.to_path_buf(),
+        root_id,
+        job_id,
+    );
+
+    Ok(())
+}
+
+fn spawn_semantic_backfill_job(
+    db_path: PathBuf,
+    vector_db_path: PathBuf,
+    model_cache_dir: PathBuf,
+    root_id: i64,
+    job_id: i64,
+) {
+    std::thread::spawn(move || {
+        let _ =
+            run_semantic_backfill_job(&db_path, &vector_db_path, &model_cache_dir, root_id, job_id);
+    });
+}
+
+fn run_semantic_backfill_job(
+    db_path: &Path,
+    vector_db_path: &Path,
+    model_cache_dir: &Path,
+    root_id: i64,
+    job_id: i64,
+) -> Result<()> {
+    let mut conn = storage::open_connection(db_path)?;
+    if !job_is_current(&conn, root_id, job_id)? {
+        return Ok(());
+    }
+
+    let candidates = storage::fetch_semantic_backfill_candidates(&conn, root_id)?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    for batch in candidates.chunks(semantic::SEMANTIC_BATCH_SIZE) {
+        if !job_is_current(&conn, root_id, job_id)? {
+            return Ok(());
+        }
+
+        let items = batch
+            .iter()
+            .filter_map(semantic::build_index_item)
+            .collect::<Vec<_>>();
+
+        if items.is_empty() {
+            continue;
+        }
+
+        match semantic::index_batch(vector_db_path, model_cache_dir, &items) {
+            Ok(records) => {
+                let tx = conn.transaction()?;
+                for record in records {
+                    storage::replace_semantic_record(
+                        &tx,
+                        record.file_id,
+                        &record.status,
+                        record.modality.as_deref(),
+                        record.model.as_deref(),
+                        record.summary.as_deref(),
+                        unix_timestamp(),
+                        record.error_message.as_deref(),
+                    )?;
+                }
+                tx.commit()?;
+            }
+            Err(error) => {
+                let tx = conn.transaction()?;
+                for item in &items {
+                    storage::replace_semantic_record(
+                        &tx,
+                        item.file_id,
+                        "error",
+                        Some(&item.modality),
+                        Some(semantic::semantic_model_name()),
+                        item.summary.as_deref(),
+                        unix_timestamp(),
+                        Some(&error.to_string()),
+                    )?;
+                }
+                tx.commit()?;
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn job_is_current(conn: &rusqlite::Connection, root_id: i64, job_id: i64) -> Result<bool> {
+    Ok(storage::fetch_latest_job(conn, root_id)?
+        .map(|job| job.job_id == job_id)
+        .unwrap_or(false))
+}
+
 fn prepare_file(path: &Path) -> PreparedFile {
     let indexed_at = unix_timestamp();
     let extension = path
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase())
         .unwrap_or_else(|| "unknown".to_string());
-    let kind = classify_kind(&extension);
-    let content = extractors::extract_file_text(path, kind, &extension);
+    let kind = classify_kind(&extension).to_string();
+    let metadata = fs::metadata(path).ok();
+    let size = metadata
+        .as_ref()
+        .map(|metadata| metadata.len() as i64)
+        .unwrap_or(0);
+    let modified_at = metadata
+        .and_then(|metadata| metadata.modified().ok())
+        .map(crate::utils::system_time_to_timestamp);
 
     PreparedFile {
         path: path.to_path_buf(),
         indexed_at,
-        content,
+        size,
+        modified_at,
+        content: extractors::placeholder_output(&kind, &extension),
+        semantic_plan: semantic::prepare_semantic_plan(&kind),
     }
+}
+
+fn is_unchanged(existing: Option<&ExistingFileSnapshot>, prepared: &PreparedFile) -> bool {
+    existing
+        .map(|existing| {
+            existing.size == prepared.size && existing.modified_at == prepared.modified_at
+        })
+        .unwrap_or(false)
 }
 
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {

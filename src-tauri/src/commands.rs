@@ -1,7 +1,7 @@
 use crate::{
     indexing,
     models::{FileDetails, IndexStatus, IndexedRoot, SearchRequest, SearchResult},
-    shell,
+    semantic, shell,
     state::AppState,
     storage,
     utils::{err_to_string, unix_timestamp},
@@ -23,6 +23,7 @@ pub fn add_index_root(path: String, state: State<'_, AppState>) -> Result<Indexe
 
 #[tauri::command]
 pub fn remove_index_root(root_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = semantic::remove_root_embeddings(&state.vector_db_path, root_id);
     let conn = state.connection().map_err(err_to_string)?;
     storage::remove_root(&conn, root_id).map_err(err_to_string)
 }
@@ -44,7 +45,14 @@ pub fn start_index(root_id: i64, state: State<'_, AppState>) -> Result<IndexStat
         storage::create_index_job(&conn, root_id, unix_timestamp()).map_err(err_to_string)?;
     drop(conn);
 
-    indexing::spawn_index_job((*state.db_path).clone(), root_id, job_id, root_path);
+    indexing::spawn_index_job(
+        (*state.db_path).clone(),
+        (*state.vector_db_path).clone(),
+        (*state.model_cache_dir).clone(),
+        root_id,
+        job_id,
+        root_path,
+    );
 
     let conn = state.connection().map_err(err_to_string)?;
     storage::fetch_job_by_id(&conn, job_id)
@@ -66,8 +74,15 @@ pub fn search_files(
     let conn = state.connection().map_err(err_to_string)?;
     let query = request.query.trim().to_lowercase();
     let limit = request.limit.unwrap_or(60).clamp(1, 200);
-    crate::search::search_files(&conn, &query, request.root_ids.as_deref(), limit)
-        .map_err(err_to_string)
+    crate::search::search_files(
+        &conn,
+        &state.vector_db_path,
+        &state.model_cache_dir,
+        &query,
+        request.root_ids.as_deref(),
+        limit,
+    )
+    .map_err(err_to_string)
 }
 
 #[tauri::command]

@@ -1,13 +1,18 @@
 use crate::{
-    models::{ContentMatch, FileCandidate, SearchResult},
-    storage,
+    models::{ContentMatch, FileCandidate, SearchResult, SemanticMatch},
+    semantic, storage,
 };
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 pub fn search_files(
     conn: &Connection,
+    vector_db_path: &Path,
+    model_cache_dir: &Path,
     query: &str,
     root_ids: Option<&[i64]>,
     limit: usize,
@@ -29,6 +34,7 @@ pub fn search_files(
                 modified_at: candidate.modified_at,
                 indexed_at: candidate.indexed_at,
                 score: 0,
+                semantic_score: None,
                 match_reasons: vec!["recent file".to_string()],
                 snippet: None,
                 snippet_source: None,
@@ -53,16 +59,51 @@ pub fn search_files(
         }
     }
 
+    if let Ok(semantic_matches) =
+        semantic::search_semantic(vector_db_path, model_cache_dir, query, root_ids, limit * 3)
+    {
+        merge_semantic_matches(conn, &mut combined, semantic_matches);
+    }
+
     let mut results = combined.into_values().collect::<Vec<_>>();
     results.sort_by(|left, right| {
         right
             .score
             .cmp(&left.score)
+            .then_with(|| compare_semantic_score(right.semantic_score, left.semantic_score))
             .then(right.modified_at.cmp(&left.modified_at))
             .then_with(|| left.name.cmp(&right.name))
     });
     results.truncate(limit);
     Ok(results)
+}
+
+fn merge_semantic_matches(
+    conn: &Connection,
+    combined: &mut HashMap<i64, SearchResult>,
+    semantic_matches: Vec<SemanticMatch>,
+) {
+    if semantic_matches.is_empty() {
+        return;
+    }
+
+    let existing_ids = combined.keys().copied().collect::<HashSet<_>>();
+    let missing_ids = semantic_matches
+        .iter()
+        .map(|hit| hit.file_id)
+        .filter(|file_id| !existing_ids.contains(file_id))
+        .collect::<Vec<_>>();
+
+    let mut candidates_by_id = storage::fetch_candidates_by_ids(conn, &missing_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|candidate| (candidate.file_id, candidate))
+        .collect::<HashMap<_, _>>();
+
+    for (rank, semantic_match) in semantic_matches.into_iter().enumerate() {
+        let fallback_candidate = candidates_by_id.remove(&semantic_match.file_id);
+        merge_semantic_match(combined, semantic_match, fallback_candidate, rank);
+    }
 }
 
 fn score_candidate(candidate: FileCandidate, query: &str, tokens: &[String]) -> SearchResult {
@@ -134,6 +175,7 @@ fn score_candidate(candidate: FileCandidate, query: &str, tokens: &[String]) -> 
         modified_at: candidate.modified_at,
         indexed_at: candidate.indexed_at,
         score,
+        semantic_score: None,
         match_reasons: reasons,
         snippet: None,
         snippet_source: None,
@@ -162,6 +204,7 @@ fn merge_content_match(
             modified_at: content_match.modified_at,
             indexed_at: content_match.indexed_at,
             score: 0,
+            semantic_score: None,
             match_reasons: Vec::new(),
             snippet: None,
             snippet_source: None,
@@ -177,6 +220,77 @@ fn merge_content_match(
 
     entry.match_reasons.sort();
     entry.match_reasons.dedup();
+}
+
+fn merge_semantic_match(
+    combined: &mut HashMap<i64, SearchResult>,
+    semantic_match: SemanticMatch,
+    fallback_candidate: Option<FileCandidate>,
+    rank: usize,
+) {
+    let modality = semantic_match.modality.clone();
+    let reason = if modality == "image" {
+        "visual match"
+    } else {
+        "semantic match"
+    };
+    let semantic_score =
+        (semantic_match.similarity * 240.0).round() as i64 - (rank as i64 * 4).min(40);
+
+    if !combined.contains_key(&semantic_match.file_id) && fallback_candidate.is_none() {
+        return;
+    }
+
+    let entry =
+        combined
+            .entry(semantic_match.file_id)
+            .or_insert_with(|| match fallback_candidate {
+                Some(candidate) => SearchResult {
+                    file_id: candidate.file_id,
+                    root_id: candidate.root_id,
+                    name: candidate.name,
+                    path: candidate.path,
+                    extension: candidate.extension,
+                    kind: candidate.kind,
+                    size: candidate.size,
+                    modified_at: candidate.modified_at,
+                    indexed_at: candidate.indexed_at,
+                    score: 0,
+                    semantic_score: None,
+                    match_reasons: Vec::new(),
+                    snippet: None,
+                    snippet_source: None,
+                },
+                None => unreachable!("semantic result without fallback candidate"),
+            });
+
+    entry.score += semantic_score.max(60);
+    entry.semantic_score = Some(
+        entry
+            .semantic_score
+            .map(|score| score.max(semantic_match.similarity))
+            .unwrap_or(semantic_match.similarity),
+    );
+    entry.match_reasons.push(reason.to_string());
+
+    if entry.snippet.is_none() && modality == "image" {
+        entry.snippet = Some("Matched using local image embeddings.".to_string());
+        entry.snippet_source = Some("Visual features".to_string());
+    }
+
+    entry.match_reasons.sort();
+    entry.match_reasons.dedup();
+}
+
+fn compare_semantic_score(left: Option<f32>, right: Option<f32>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn tokenize(query: &str) -> Vec<String> {

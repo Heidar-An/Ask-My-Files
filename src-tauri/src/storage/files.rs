@@ -1,5 +1,5 @@
 use crate::{
-    models::{FileCandidate, FileDetails, StoredFile},
+    models::{ExistingFileSnapshot, FileCandidate, FileDetails, StoredFile},
     preview::preview_path_for_kind,
 };
 use anyhow::{anyhow, Context, Result};
@@ -73,8 +73,68 @@ pub fn fetch_candidates(
     Ok(candidates)
 }
 
+pub fn fetch_candidates_by_ids(conn: &Connection, file_ids: &[i64]) -> Result<Vec<FileCandidate>> {
+    if file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT id, root_id, name, path, extension, kind, size, modified_at, indexed_at
+         FROM files
+         WHERE id IN (",
+    );
+    sql.push_str(
+        &std::iter::repeat("?")
+            .take(file_ids.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push(')');
+
+    let values = file_ids
+        .iter()
+        .copied()
+        .map(Value::Integer)
+        .collect::<Vec<_>>();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), map_file_candidate)?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    Ok(candidates)
+}
+
+pub fn fetch_root_file_snapshots(
+    conn: &Connection,
+    root_id: i64,
+) -> Result<Vec<ExistingFileSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, size, modified_at
+         FROM files
+         WHERE root_id = ?1",
+    )?;
+
+    let rows = stmt.query_map(params![root_id], |row| {
+        Ok(ExistingFileSnapshot {
+            file_id: row.get(0)?,
+            path: row.get(1)?,
+            size: row.get(2)?,
+            modified_at: row.get(3)?,
+        })
+    })?;
+
+    let mut snapshots = Vec::new();
+    for row in rows {
+        snapshots.push(row?);
+    }
+    Ok(snapshots)
+}
+
 pub fn fetch_file_details(conn: &Connection, file_id: i64) -> Result<FileDetails> {
     let content_preview = super::fetch_content_preview(conn, file_id)?;
+    let semantic_preview = super::fetch_semantic_preview(conn, file_id)?;
     let details = conn.query_row(
         "SELECT f.id,
                 f.root_id,
@@ -92,6 +152,7 @@ pub fn fetch_file_details(conn: &Connection, file_id: i64) -> Result<FileDetails
         params![file_id],
         |row| {
             let path: String = row.get(4)?;
+            let extension: String = row.get(5)?;
             let kind: String = row.get(6)?;
             Ok(FileDetails {
                 file_id: row.get(0)?,
@@ -99,16 +160,21 @@ pub fn fetch_file_details(conn: &Connection, file_id: i64) -> Result<FileDetails
                 root_path: row.get(2)?,
                 name: row.get(3)?,
                 path: path.clone(),
-                extension: row.get(5)?,
+                extension: extension.clone(),
                 kind: kind.clone(),
                 size: row.get(7)?,
                 modified_at: row.get(8)?,
                 indexed_at: row.get(9)?,
-                preview_path: preview_path_for_kind(&path, &kind),
+                preview_path: preview_path_for_kind(&path, &kind, &extension),
                 content_status: content_preview.content_status.clone(),
                 content_snippet: content_preview.content_snippet.clone(),
                 content_source: content_preview.content_source.clone(),
                 extraction_error: content_preview.extraction_error.clone(),
+                semantic_status: semantic_preview.semantic_status.clone(),
+                semantic_modality: semantic_preview.semantic_modality.clone(),
+                semantic_model: semantic_preview.semantic_model.clone(),
+                semantic_summary: semantic_preview.semantic_summary.clone(),
+                semantic_error: semantic_preview.semantic_error.clone(),
             })
         },
     )?;
@@ -116,8 +182,26 @@ pub fn fetch_file_details(conn: &Connection, file_id: i64) -> Result<FileDetails
     Ok(details)
 }
 
-pub fn delete_files_for_root(conn: &Connection, root_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM files WHERE root_id = ?1", params![root_id])?;
+pub fn delete_files_by_ids(conn: &Connection, file_ids: &[i64]) -> Result<()> {
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut sql = String::from("DELETE FROM files WHERE id IN (");
+    sql.push_str(
+        &std::iter::repeat("?")
+            .take(file_ids.len())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push(')');
+
+    let values = file_ids
+        .iter()
+        .copied()
+        .map(Value::Integer)
+        .collect::<Vec<_>>();
+    conn.execute(&sql, params_from_iter(values.iter()))?;
     Ok(())
 }
 

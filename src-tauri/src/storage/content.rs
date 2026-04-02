@@ -1,23 +1,9 @@
 use crate::{
     extractors::ExtractionOutput,
-    models::{ContentMatch, FileContentPreview},
+    models::{ContentMatch, ContentSourceFile, FileContentPreview},
 };
 use anyhow::Result;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
-
-pub fn clear_content_for_root(conn: &Connection, root_id: i64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM file_text_chunks
-         WHERE file_id IN (SELECT id FROM files WHERE root_id = ?1)",
-        params![root_id],
-    )?;
-    conn.execute(
-        "DELETE FROM file_extracts
-         WHERE file_id IN (SELECT id FROM files WHERE root_id = ?1)",
-        params![root_id],
-    )?;
-    Ok(())
-}
 
 pub fn replace_file_content(
     conn: &Connection,
@@ -58,17 +44,22 @@ pub fn replace_file_content(
         ],
     )?;
 
+    if output.chunks.is_empty() {
+        return Ok(());
+    }
+
+    let mut insert_chunk = conn.prepare_cached(
+        "INSERT INTO file_text_chunks (file_id, chunk_index, source_label, text)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+
     for (chunk_index, chunk) in output.chunks.iter().enumerate() {
-        conn.execute(
-            "INSERT INTO file_text_chunks (file_id, chunk_index, source_label, text)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                file_id,
-                chunk_index as i64,
-                chunk.source_label.as_deref(),
-                &chunk.text
-            ],
-        )?;
+        insert_chunk.execute(params![
+            file_id,
+            chunk_index as i64,
+            chunk.source_label.as_deref(),
+            &chunk.text
+        ])?;
     }
 
     Ok(())
@@ -170,6 +161,35 @@ pub fn search_content_matches(
         matches.push(row?);
     }
     Ok(matches)
+}
+
+pub fn fetch_content_backfill_candidates(
+    conn: &Connection,
+    root_id: i64,
+) -> Result<Vec<ContentSourceFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.path, f.extension, f.kind
+         FROM files f
+         JOIN file_extracts e ON e.file_id = f.id
+         WHERE f.root_id = ?1
+           AND e.status = 'pending'
+         ORDER BY f.id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![root_id], |row| {
+        Ok(ContentSourceFile {
+            file_id: row.get(0)?,
+            path: row.get(1)?,
+            extension: row.get(2)?,
+            kind: row.get(3)?,
+        })
+    })?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    Ok(candidates)
 }
 
 fn truncate_preview(text: &str) -> String {

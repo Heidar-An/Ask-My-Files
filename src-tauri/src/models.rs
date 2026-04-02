@@ -7,6 +7,10 @@ pub struct IndexedRoot {
     pub path: String,
     pub status: String,
     pub file_count: i64,
+    pub content_indexed_count: i64,
+    pub content_pending_count: i64,
+    pub semantic_indexed_count: i64,
+    pub semantic_pending_count: i64,
     pub last_indexed_at: Option<i64>,
     pub last_error: Option<String>,
 }
@@ -24,6 +28,7 @@ pub struct SearchResult {
     pub modified_at: Option<i64>,
     pub indexed_at: i64,
     pub score: i64,
+    pub semantic_score: Option<f32>,
     pub match_reasons: Vec<String>,
     pub snippet: Option<String>,
     pub snippet_source: Option<String>,
@@ -47,6 +52,11 @@ pub struct FileDetails {
     pub content_snippet: Option<String>,
     pub content_source: Option<String>,
     pub extraction_error: Option<String>,
+    pub semantic_status: Option<String>,
+    pub semantic_modality: Option<String>,
+    pub semantic_model: Option<String>,
+    pub semantic_summary: Option<String>,
+    pub semantic_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,4 +121,46 @@ pub struct FileContentPreview {
     pub content_snippet: Option<String>,
     pub content_source: Option<String>,
     pub extraction_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct FileSemanticPreview {
+    pub semantic_status: Option<String>,
+    pub semantic_modality: Option<String>,
+    pub semantic_model: Option<String>,
+    pub semantic_summary: Option<String>,
+    pub semantic_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticMatch {
+    pub file_id: i64,
+    pub modality: String,
+    pub similarity: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticSourceFile {
+    pub file_id: i64,
+    pub root_id: i64,
+    pub path: String,
+    pub kind: String,
+    pub summary: Option<String>,
+    pub content_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContentSourceFile {
+    pub file_id: i64,
+    pub path: String,
+    pub extension: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExistingFileSnapshot {
+    pub file_id: i64,
+    pub path: String,
+    pub size: i64,
+    pub modified_at: Option<i64>,
 }
