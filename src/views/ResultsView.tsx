@@ -27,6 +27,7 @@ import {
 
 export interface ResultsViewProps {
   query: string;
+  setQuery: (value: string) => void;
   results: SearchResult[];
   selectedFile: FileDetails | null;
   selectedPreviewUrl: string | null;
@@ -51,6 +52,7 @@ export interface ResultsViewProps {
 
 export function ResultsView({
   query,
+  setQuery,
   results,
   selectedFile,
   selectedPreviewUrl,
@@ -80,15 +82,26 @@ export function ResultsView({
   return (
     <div className="space-y-6">
       <section className="px-1 pt-2">
+        <div className="mx-auto mb-6 max-w-5xl rounded-[28px] border border-black/5 bg-white/78 p-3 shadow-[0_22px_60px_rgba(85,93,122,0.08)]">
+          <div className="flex items-center gap-4 rounded-[22px] bg-[#fcfbf8] px-5 py-4">
+            <SparkleIcon className="h-6 w-6 shrink-0 text-[#737792]" />
+            <input
+              className="w-full bg-transparent text-[1.15rem] text-[#222825] outline-none placeholder:text-[#9da2a6]"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              placeholder="Search your workspace..."
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+            />
+          </div>
+        </div>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-[0.82rem] uppercase tracking-[0.22em] text-[#727792]">
-              Search query analysis
-            </p>
-            <h1 className="display-type mt-4 max-w-4xl text-[clamp(2.3rem,5vw,4.1rem)] leading-[0.98] text-[#242b28]">
-              {query.trim().length > 0 ? query : "Explore your workspace"}
-            </h1>
-            <div className="mt-4 flex flex-wrap items-center gap-3 text-[1.05rem] text-[#686f6c]">
+            <div className="flex flex-wrap items-center gap-3 text-[1.05rem] text-[#686f6c]">
               <span className="inline-flex items-center gap-2 text-[#272d2a]">
                 <SparkleIcon className="h-5 w-5 text-[#737792]" />
                 Hybrid lexical + visual matches

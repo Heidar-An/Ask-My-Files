@@ -125,6 +125,7 @@ export function App() {
               {state.currentView === "results" && (
                 <ResultsView
                   query={state.query}
+                  setQuery={actions.setQuery}
                   results={derived.visibleResults}
                   selectedFile={state.selectedFile}
                   selectedPreviewUrl={derived.selectedPreviewUrl}
